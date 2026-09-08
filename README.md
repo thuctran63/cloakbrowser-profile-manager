@@ -54,6 +54,20 @@ Dependency CloakBrowser được pin vào commit bất biến của custom fork 
 
 API mặc định chạy tại `http://127.0.0.1:8765`. URL, port và API key được hiển thị và cấu hình trong cửa sổ **Settings**. API chỉ bind tại localhost để không công khai quyền điều khiển browser ra mạng.
 
+### OpenAPI và Swagger UI
+
+- Swagger UI: `http://127.0.0.1:8765/docs`
+- OpenAPI 3.1 JSON: `http://127.0.0.1:8765/openapi.json`
+
+Hai endpoint tài liệu không yêu cầu API key để Swagger UI có thể tải schema. Các
+endpoint thao tác vẫn yêu cầu xác thực nếu API key đã được cấu hình. Trong
+Swagger UI, bấm **Authorize** rồi nhập API key bằng Bearer token hoặc
+`X-API-Key`.
+
+OpenAPI mô tả đầy đủ các endpoint hiện có: health/readiness, capacity status,
+profile CRUD, operation Open/Close bất đồng bộ, polling operation và các
+endpoint lifecycle đồng bộ legacy.
+
 ### Xác thực
 
 Nếu API key trong Settings không rỗng, gửi một trong hai header:

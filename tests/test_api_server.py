@@ -65,6 +65,36 @@ class ProfileApiServerTests(unittest.TestCase):
             self.request("GET", "/api/profiles", authenticated=False)
         self.assertEqual(raised.exception.code, 401)
 
+    def test_openapi_documents_every_route_without_authentication(self) -> None:
+        status, document = self.request("GET", "/openapi.json", authenticated=False)
+        self.assertEqual(status, 200)
+        self.assertEqual(document["openapi"], "3.1.0")
+        expected = {
+            "/health",
+            "/health/live",
+            "/health/ready",
+            "/api/v1/status",
+            "/api/v1/operations/{operation_id}",
+            "/api/v1/profiles/{profile_id}/operations/open",
+            "/api/v1/profiles/{profile_id}/operations/close",
+            "/api/profiles",
+            "/api/profiles/{profile_id}",
+            "/api/profiles/{profile_id}/open",
+            "/api/profiles/{profile_id}/close",
+        }
+        self.assertEqual(set(document["paths"]), expected)
+        self.assertEqual(document["servers"][0]["url"], self.server.address)
+        self.assertIn("bearerAuth", document["components"]["securitySchemes"])
+        self.assertIn("apiKeyAuth", document["components"]["securitySchemes"])
+
+    def test_swagger_ui_is_available_without_authentication(self) -> None:
+        request = Request(self.server.address + "/docs", method="GET")
+        with urlopen(request, timeout=5) as response:
+            content = response.read().decode("utf-8")
+        self.assertEqual(response.status, 200)
+        self.assertIn("SwaggerUIBundle", content)
+        self.assertIn("/openapi.json", content)
+
     def test_v1_open_returns_pollable_operation(self) -> None:
         _, profile = self.request("POST", "/api/profiles", {"name": "Operation"})
 

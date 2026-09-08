@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from .browser_service import BrowserService
 from .models import ProfileConfig
+from .openapi import SWAGGER_UI_HTML, build_openapi
 from .operations import OperationRegistry
 from .profile_store import ProfileStore
 from .worker import AsyncWorker
@@ -82,6 +83,13 @@ class ProfileApiServer:
             def _dispatch(self, method: str) -> None:
                 request_id = str(uuid.uuid4())
                 try:
+                    path = urlparse(self.path).path.rstrip("/") or "/"
+                    if path == "/openapi.json" and method == "GET":
+                        self._json(HTTPStatus.OK, build_openapi(api.address))
+                        return
+                    if path == "/docs" and method == "GET":
+                        self._html(HTTPStatus.OK, SWAGGER_UI_HTML)
+                        return
                     supplied_key = self.headers.get("Authorization", "").removeprefix("Bearer ") or self.headers.get("X-API-Key", "")
                     if api.api_key and not secrets.compare_digest(supplied_key, api.api_key):
                         self._error(HTTPStatus.UNAUTHORIZED, "invalid_api_key", "API key không hợp lệ", request_id)
@@ -89,7 +97,6 @@ class ProfileApiServer:
                     if not api._allow_request():
                         self._error(HTTPStatus.TOO_MANY_REQUESTS, "rate_limit_exceeded", "Vượt giới hạn request", request_id)
                         return
-                    path = urlparse(self.path).path.rstrip("/") or "/"
                     parts = path.split("/")
                     if path == "/health" and method == "GET":
                         self._json(HTTPStatus.OK, {"status": "ok"})
@@ -208,6 +215,14 @@ class ProfileApiServer:
                 self.send_header("Content-Length", str(len(content)))
                 self.end_headers()
                 self.wfile.write(content)
+
+            def _html(self, status: HTTPStatus, content: str) -> None:
+                encoded = content.encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
 
             def _error(self, status: HTTPStatus, code: str, message: str, request_id: str) -> None:
                 self._json(status, {"error": {"code": code, "message": message, "request_id": request_id}})
