@@ -1,0 +1,11 @@
+.env
+binaries/
+cloakbrowser/
+__pycache__/
+.profile-manager/
+profiles/
+*.pyc
+build/
+dist/
+*.spec.bak
+.pytest_cache/
