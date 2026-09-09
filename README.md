@@ -64,9 +64,8 @@ endpoint thao tác vẫn yêu cầu xác thực nếu API key đã được cấ
 Swagger UI, bấm **Authorize** rồi nhập API key bằng Bearer token hoặc
 `X-API-Key`.
 
-OpenAPI mô tả đầy đủ các endpoint hiện có: health/readiness, capacity status,
-profile CRUD, operation Open/Close bất đồng bộ, polling operation và các
-endpoint lifecycle đồng bộ legacy.
+OpenAPI mô tả đầy đủ các endpoint hiện có: health/readiness, runtime status,
+profile CRUD, operation Open/Close bất đồng bộ và polling operation.
 
 ### Xác thực
 
@@ -86,6 +85,27 @@ Mở browser không giữ HTTP connection trong lúc Chromium khởi động:
 ```http
 POST /api/v1/profiles/{profile_id}/operations/open
 ```
+
+Có thể truyền vị trí, kích thước cửa sổ native và mức page zoom theo từng lần mở:
+
+```json
+{
+	"pos_x": 8,
+	"pos_y": 8,
+	"width": 470,
+	"height": 349,
+	"page_zoom": 75
+}
+```
+
+`width`/`height` chỉ điều khiển kích thước cửa sổ native và không bật viewport
+emulation; `page_zoom` là phần trăm native Chromium zoom trong khoảng `25–100`
+(ví dụ `75` là 75%), được áp dụng trước khi browser khởi động và không dùng CSS
+zoom. `pos_x` phải đi cùng `pos_y`;
+`width` phải đi cùng `height`. Các tùy chọn chỉ
+áp dụng runtime, không thay đổi fingerprint hoặc metadata profile. Chromium và
+Windows có thể tự nâng kích thước quá nhỏ lên kích thước cửa sổ tối thiểu theo
+DPI/theme hiện tại.
 
 Response `202 Accepted` có `Location` và `Retry-After: 1`:
 
@@ -132,25 +152,21 @@ async with async_playwright() as playwright:
 		await browser.close()  # Chỉ ngắt client CDP; dùng Close API để đóng profile.
 ```
 
-### CRUD tương thích
+### Profile CRUD
 
-Các endpoint CRUD hiện tại được giữ để client cũ tiếp tục hoạt động:
+Các endpoint CRUD:
 
 - `GET/POST /api/profiles`
 - `GET/PATCH/DELETE /api/profiles/{id}`
-- `POST /api/profiles/{id}/open`
-- `POST /api/profiles/{id}/close`
-
-Hai endpoint Open/Close legacy vẫn chờ kết quả đồng bộ. Client mới nên dùng operation API v1.
 
 Profile response không trả `fingerprint_seed`. Không thể sửa hoặc xóa profile khi browser không ở trạng thái `Stopped`.
 
-### Health và capacity
+### Health và runtime status
 
 - `GET /health` — tương thích cũ.
 - `GET /health/live` — HTTP server đang sống.
 - `GET /health/ready` — database, worker sẵn sàng và service chưa draining.
-- `GET /api/v1/status` — số profile `starting`, `running`, limit, active operations và trạng thái worker/draining.
+- `GET /api/v1/status` — số profile `starting`, `running`, active operations và trạng thái worker/draining.
 
 ### Status code và lỗi
 

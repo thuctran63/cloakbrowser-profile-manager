@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from profile_manager.browser_service import BrowserService
-from profile_manager.models import ProfileConfig, RuntimeState
+from profile_manager.models import OpenOptions, ProfileConfig, RuntimeState
 
 
 class FakeContext:
     def __init__(self) -> None:
-        self.pages = [object()]
+        self.pages = [FakePage()]
         self.handlers = {}
         self.closed = False
 
@@ -21,6 +23,40 @@ class FakeContext:
 
     async def close(self) -> None:
         self.closed = True
+
+    async def new_cdp_session(self, page):
+        return FakeCdpSession()
+
+    async def add_init_script(self, script):
+        self.init_script = script
+
+
+class FakeCdpSession:
+    calls = []
+
+    async def send(self, method, params=None):
+        self.calls.append((method, params))
+        if method == "Browser.getWindowForTarget":
+            return {"windowId": 42}
+        return {}
+
+    async def detach(self):
+        return None
+
+
+class FakePage:
+    def __init__(self) -> None:
+        self.main_frame = object()
+        self.handlers = {}
+
+    def on(self, event, handler) -> None:
+        self.handlers[event] = handler
+
+    async def evaluate(self, script):
+        self.evaluated_script = script
+
+    def is_closed(self) -> bool:
+        return False
 
 
 class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -109,6 +145,54 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
         self.service.begin_draining()
         with self.assertRaisesRegex(RuntimeError, "shutdown"):
             await self.service.open(self.profile)
+
+    async def test_open_applies_window_geometry_and_page_zoom(self) -> None:
+        context = FakeContext()
+        FakeCdpSession.calls = []
+
+        async def launch(*_args, **kwargs):
+            self.assertIn("--window-position=8,365", kwargs["args"])
+            self.assertIn("--window-size=470,349", kwargs["args"])
+            return context
+
+        options = OpenOptions(
+            pos_x=8,
+            pos_y=365,
+            width=470,
+            height=349,
+            page_zoom=75,
+        )
+        with patch("profile_manager.browser_service.launch_persistent_context_async", launch), patch(
+            "profile_manager.browser_service.discover_cdp_url", return_value="http://127.0.0.1:9222"
+        ):
+            await self.service.open(self.profile, options)
+
+        preferences = json.loads(
+            (self.profile.user_data_dir / "Default" / "Preferences").read_text(
+                encoding="utf-8"
+            )
+        )
+        expected_level = math.log(0.75) / math.log(1.2)
+        self.assertAlmostEqual(
+            preferences["partition"]["default_zoom_level"]["x"], expected_level
+        )
+        self.assertFalse(hasattr(context, "init_script"))
+        self.assertIn(
+            (
+                "Browser.setWindowBounds",
+                {
+                    "windowId": 42,
+                    "bounds": {
+                        "windowState": "normal",
+                        "left": 8,
+                        "top": 365,
+                        "width": 470,
+                        "height": 349,
+                    },
+                },
+            ),
+            FakeCdpSession.calls,
+        )
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .browser_service import BrowserService
-from .models import ProfileConfig
+from .models import OpenOptions, ProfileConfig
 from .openapi import SWAGGER_UI_HTML, build_openapi
 from .operations import OperationRegistry
 from .profile_store import ProfileStore
@@ -119,8 +119,6 @@ class ProfileApiServer:
                         self._json(HTTPStatus.CREATED, self._profile(profile))
                     elif len(parts) == 4 and parts[1:3] == ["api", "profiles"]:
                         self._profile_route(method, parts[3])
-                    elif len(parts) == 5 and parts[1:3] == ["api", "profiles"]:
-                        self._action_route(method, parts[3], parts[4])
                     else:
                         self._json(HTTPStatus.NOT_FOUND, {"error": "Endpoint không tồn tại"})
                 except KeyError as exc:
@@ -152,28 +150,15 @@ class ProfileApiServer:
                 else:
                     self._json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "Method không hợp lệ"})
 
-            def _action_route(self, method: str, profile_id: str, action: str) -> None:
-                if method != "POST":
-                    self._json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "Method không hợp lệ"})
-                    return
-                profile = self._find_profile(profile_id)
-                if action == "open":
-                    cdp_url = api.worker.submit(api.browser_service.open(profile)).result(timeout=60)
-                    self._json(HTTPStatus.OK, {"profile_id": profile_id, "status": "Running", "cdp_url": cdp_url})
-                elif action == "close":
-                    api.worker.submit(api.browser_service.close(profile_id)).result(timeout=30)
-                    self._json(HTTPStatus.OK, {"profile_id": profile_id, "status": "Stopped"})
-                else:
-                    self._json(HTTPStatus.NOT_FOUND, {"error": "Action không tồn tại"})
-
             def _operation_route(self, method: str, profile_id: str, action: str) -> None:
                 if method != "POST" or action not in {"open", "close"}:
                     raise KeyError("Endpoint không tồn tại")
                 profile = self._find_profile(profile_id)
+                options = OpenOptions.from_dict(self._body()) if action == "open" else None
                 operation, created = api.operations.create(profile_id, action)
                 if created:
                     api.operations.start(operation.id)
-                    coroutine = api.browser_service.open(profile) if action == "open" else api.browser_service.close(profile_id)
+                    coroutine = api.browser_service.open(profile, options) if action == "open" else api.browser_service.close(profile_id)
                     api.operations.observe(operation.id, api.worker.submit(coroutine))
                 payload = {"data": operation.to_dict()}
                 self.send_response(HTTPStatus.ACCEPTED)

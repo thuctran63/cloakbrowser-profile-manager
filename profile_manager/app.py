@@ -31,7 +31,6 @@ class ProfileManagerApp:
         self.service = BrowserService(
             self._on_worker_state,
             api_settings.max_concurrent_launches,
-            api_settings.max_running_profiles,
         )
         self.api_server = ProfileApiServer(
             self.store,
@@ -215,9 +214,7 @@ class ProfileManagerApp:
             messagebox.showerror("Không thể lưu settings", str(exc), parent=self.root)
 
     async def _apply_runtime_settings(self, settings: AppSettings) -> None:
-        self.service.configure_limits(
-            settings.max_concurrent_launches, settings.max_running_profiles
-        )
+        self.service.configure_limits(settings.max_concurrent_launches)
 
     def _observe(self, future: Future[Any], error_title: str, profile: ProfileConfig) -> None:
         def complete(done: Future[Any]) -> None:

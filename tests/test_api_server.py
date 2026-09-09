@@ -79,8 +79,6 @@ class ProfileApiServerTests(unittest.TestCase):
             "/api/v1/profiles/{profile_id}/operations/close",
             "/api/profiles",
             "/api/profiles/{profile_id}",
-            "/api/profiles/{profile_id}/open",
-            "/api/profiles/{profile_id}/close",
         }
         self.assertEqual(set(document["paths"]), expected)
         self.assertEqual(document["servers"][0]["url"], self.server.address)
@@ -98,12 +96,23 @@ class ProfileApiServerTests(unittest.TestCase):
     def test_v1_open_returns_pollable_operation(self) -> None:
         _, profile = self.request("POST", "/api/profiles", {"name": "Operation"})
 
-        async def open_profile(_profile):
+        received_options = []
+
+        async def open_profile(_profile, options):
+            received_options.append(options)
             return "http://127.0.0.1:9222"
 
         self.service.open = open_profile
         status, accepted = self.request(
-            "POST", f"/api/v1/profiles/{profile['id']}/operations/open"
+            "POST",
+            f"/api/v1/profiles/{profile['id']}/operations/open",
+            {
+                "pos_x": 8,
+                "pos_y": 8,
+                "width": 470,
+                "height": 349,
+                "page_zoom": 75,
+            },
         )
         self.assertEqual(status, 202)
         operation_id = accepted["data"]["id"]
@@ -114,6 +123,19 @@ class ProfileApiServerTests(unittest.TestCase):
                 break
             time.sleep(0.01)
         self.assertEqual(polled["data"]["result"]["cdp_url"], "http://127.0.0.1:9222")
+        self.assertEqual(received_options[0].pos_x, 8)
+        self.assertEqual(received_options[0].width, 470)
+        self.assertEqual(received_options[0].page_zoom, 75)
+
+    def test_open_rejects_incomplete_geometry(self) -> None:
+        _, profile = self.request("POST", "/api/profiles", {"name": "Geometry"})
+        with self.assertRaises(HTTPError) as raised:
+            self.request(
+                "POST",
+                f"/api/v1/profiles/{profile['id']}/operations/open",
+                {"pos_x": 8},
+            )
+        self.assertEqual(raised.exception.code, 400)
 
     def test_health_and_status(self) -> None:
         self.assertEqual(self.request("GET", "/health/live")[0], 200)

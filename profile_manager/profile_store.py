@@ -72,8 +72,6 @@ class ProfileStore:
             raise ValueError("API port phải nằm trong khoảng 1–65535")
         if not 1 <= settings.max_concurrent_launches <= 20:
             raise ValueError("Concurrent launches phải nằm trong khoảng 1–20")
-        if not settings.max_concurrent_launches <= settings.max_running_profiles <= 100:
-            raise ValueError("Running profiles phải từ concurrent launches đến 100")
         if not 10 <= settings.requests_per_minute <= 10_000:
             raise ValueError("Requests/phút phải nằm trong khoảng 10–10000")
         self._atomic_write(self.settings_path, settings.to_dict())

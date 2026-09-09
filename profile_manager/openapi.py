@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import __version__
+
 
 def _response(description: str, schema: str | None = None) -> dict[str, Any]:
     response: dict[str, Any] = {"description": description}
@@ -52,7 +54,7 @@ def build_openapi(server_url: str) -> dict[str, Any]:
         "openapi": "3.1.0",
         "info": {
             "title": "CloakBrowser Profile Manager API",
-            "version": "1.0.0",
+            "version": __version__,
             "description": (
                 "Localhost API for persistent profile CRUD, browser lifecycle, and CDP automation. "
                 "Authentication is disabled when no API key is configured. Prefer asynchronous v1 lifecycle endpoints."
@@ -64,7 +66,6 @@ def build_openapi(server_url: str) -> dict[str, Any]:
             {"name": "Status"},
             {"name": "Profiles"},
             {"name": "Operations"},
-            {"name": "Legacy lifecycle"},
         ],
         "paths": {
             "/health": {
@@ -101,6 +102,10 @@ def build_openapi(server_url: str) -> dict[str, Any]:
                     {"202": _response("Operation accepted", "OperationResponse")},
                     parameters=[profile_id],
                     description="Returns Location and Retry-After headers. Poll the operation until succeeded or failed.",
+                    requestBody={
+                        "required": False,
+                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OpenOptions"}}},
+                    },
                 )
             },
             "/api/v1/profiles/{profile_id}/operations/close": {
@@ -142,24 +147,6 @@ def build_openapi(server_url: str) -> dict[str, Any]:
                     parameters=[profile_id],
                 ),
             },
-            "/api/profiles/{profile_id}/open": {
-                "post": operation(
-                    "Open profile synchronously (legacy)",
-                    "Legacy lifecycle",
-                    {"200": _response("Profile running", "LegacyOpenResponse")},
-                    parameters=[profile_id],
-                    deprecated=True,
-                )
-            },
-            "/api/profiles/{profile_id}/close": {
-                "post": operation(
-                    "Close profile synchronously (legacy)",
-                    "Legacy lifecycle",
-                    {"200": _response("Profile stopped", "LegacyCloseResponse")},
-                    parameters=[profile_id],
-                    deprecated=True,
-                )
-            },
         },
         "components": {
             "securitySchemes": {
@@ -192,6 +179,18 @@ def build_openapi(server_url: str) -> dict[str, Any]:
                     "minProperties": 1,
                     "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 80}, "proxy": {"type": ["string", "null"]}},
                 },
+                "OpenOptions": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "description": "Runtime-only native window geometry and native Chromium page zoom in percent. Position and size values must be supplied in pairs. Browser viewport emulation is not used.",
+                    "properties": {
+                        "pos_x": {"type": "integer", "minimum": -100000, "maximum": 100000, "examples": [8]},
+                        "pos_y": {"type": "integer", "minimum": -100000, "maximum": 100000, "examples": [8]},
+                        "width": {"type": "integer", "minimum": 100, "maximum": 10000, "examples": [470]},
+                        "height": {"type": "integer", "minimum": 100, "maximum": 10000, "examples": [349]},
+                        "page_zoom": {"type": "number", "minimum": 25, "maximum": 100, "examples": [75]},
+                    },
+                },
                 "ProfileList": {"type": "object", "required": ["profiles"], "properties": {"profiles": {"type": "array", "items": {"$ref": "#/components/schemas/Profile"}}}},
                 "Operation": {
                     "type": "object",
@@ -209,14 +208,12 @@ def build_openapi(server_url: str) -> dict[str, Any]:
                     },
                 },
                 "OperationResponse": {"type": "object", "required": ["data"], "properties": {"data": {"$ref": "#/components/schemas/Operation"}}},
-                "StatusResponse": {"type": "object", "properties": {"data": {"type": "object", "required": ["running", "starting", "limit", "active_operations", "worker_alive", "draining"], "properties": {"running": {"type": "integer"}, "starting": {"type": "integer"}, "limit": {"type": "integer"}, "active_operations": {"type": "integer"}, "worker_alive": {"type": "boolean"}, "draining": {"type": "boolean"}}}}},
+                "StatusResponse": {"type": "object", "properties": {"data": {"type": "object", "required": ["running", "starting", "active_operations", "worker_alive", "draining"], "properties": {"running": {"type": "integer"}, "starting": {"type": "integer"}, "active_operations": {"type": "integer"}, "worker_alive": {"type": "boolean"}, "draining": {"type": "boolean"}}}}},
                 "HealthOk": {"type": "object", "properties": {"status": {"const": "ok"}}},
                 "HealthAlive": {"type": "object", "properties": {"status": {"const": "alive"}}},
                 "HealthReady": {"type": "object", "properties": {"status": {"const": "ready"}}},
                 "HealthNotReady": {"type": "object", "properties": {"status": {"const": "not_ready"}}},
                 "DeleteResponse": {"type": "object", "properties": {"deleted": {"const": True}}},
-                "LegacyOpenResponse": {"type": "object", "properties": {"profile_id": {"type": "string", "format": "uuid"}, "status": {"const": "Running"}, "cdp_url": {"type": "string", "format": "uri"}}},
-                "LegacyCloseResponse": {"type": "object", "properties": {"profile_id": {"type": "string", "format": "uuid"}, "status": {"const": "Stopped"}}},
                 "ErrorResponse": {"type": "object", "properties": {"error": {"type": "object", "required": ["code", "message", "request_id"], "properties": {"code": {"type": "string"}, "message": {"type": "string"}, "request_id": {"type": "string", "format": "uuid"}}}}},
             },
         },

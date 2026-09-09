@@ -22,7 +22,6 @@ class SettingsDialog(tk.Toplevel):
         self.api_port_var = tk.StringVar(value=str(settings.api_port))
         self.api_key_var = tk.StringVar(value=settings.api_key)
         self.launches_var = tk.StringVar(value=str(settings.max_concurrent_launches))
-        self.running_var = tk.StringVar(value=str(settings.max_running_profiles))
         self.rate_var = tk.StringVar(value=str(settings.requests_per_minute))
         self.show_key_var = tk.BooleanVar(value=False)
         self.error_var = tk.StringVar()
@@ -72,8 +71,6 @@ class SettingsDialog(tk.Toplevel):
         ).grid(row=11, column=0, columnspan=2, sticky="w", pady=(6, 0))
         ttk.Label(frame, text="Giới hạn launch đồng thời").grid(row=12, column=0, sticky="w", pady=(12, 0))
         ttk.Entry(frame, textvariable=self.launches_var, width=12).grid(row=13, column=0, sticky="w", pady=(4, 0))
-        ttk.Label(frame, text="Tổng profile đang chạy").grid(row=12, column=1, sticky="w", padx=(8, 0), pady=(12, 0))
-        ttk.Entry(frame, textvariable=self.running_var, width=12).grid(row=13, column=1, sticky="w", padx=(8, 0), pady=(4, 0))
         ttk.Label(frame, text="API requests/phút").grid(row=14, column=0, columnspan=2, sticky="w", pady=(12, 0))
         ttk.Entry(frame, textvariable=self.rate_var, width=12).grid(row=15, column=0, sticky="w", pady=(4, 0))
         ttk.Label(frame, textvariable=self.error_var, foreground="#b42318").grid(
@@ -104,13 +101,12 @@ class SettingsDialog(tk.Toplevel):
             return
         try:
             launches = int(self.launches_var.get())
-            running = int(self.running_var.get())
             rate = int(self.rate_var.get())
         except ValueError:
             self.error_var.set("Các giới hạn phải là số nguyên")
             return
-        if not 1 <= launches <= 20 or not launches <= running <= 100 or not 10 <= rate <= 10_000:
-            self.error_var.set("Giới hạn không hợp lệ (launch 1–20, running launch–100, rate 10–10000)")
+        if not 1 <= launches <= 20 or not 10 <= rate <= 10_000:
+            self.error_var.set("Giới hạn không hợp lệ (launch 1–20, rate 10–10000)")
             return
         self.result = AppSettings(
             default_profiles_dir=str(Path(raw).expanduser().resolve()),
@@ -118,7 +114,6 @@ class SettingsDialog(tk.Toplevel):
             api_port=port,
             api_key=self.api_key_var.get().strip(),
             max_concurrent_launches=launches,
-            max_running_profiles=running,
             requests_per_minute=rate,
         )
         self.destroy()
