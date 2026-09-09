@@ -1,2 +1,2 @@
-cloakbrowser @ git+https://github.com/thuctran63/CloakBrowser.git@8fd739771368a610605ca20389b829cd1936980c
+cloakbrowser @ git+https://github.com/thuctran63/CloakBrowser.git@4013c0f33858329fd17bdac48ef9326f2b2d43be
 python-dotenv==1.2.2
