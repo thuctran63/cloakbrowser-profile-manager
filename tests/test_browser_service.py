@@ -157,8 +157,8 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
         async def launch(*_args, **kwargs):
             self.assertIn("--window-position=8,365", kwargs["args"])
             self.assertIn("--window-size=470,349", kwargs["args"])
-            self.assertIn("--app=about:blank", kwargs["args"])
-            self.assertNotIn("--app=https://www.facebook.com", kwargs["args"])
+            self.assertIn("--app=https://www.facebook.com", kwargs["args"])
+            self.assertNotIn("--app=about:blank", kwargs["args"])
             return context
 
         options = OpenOptions(
@@ -186,7 +186,7 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(hasattr(context, "init_script"))
         self.assertEqual(
             context.pages[0].goto_urls,
-            ["https://www.facebook.com"],
+            [],
         )
         self.assertIn(
             (

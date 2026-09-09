@@ -65,6 +65,12 @@ class ProfileApiServerTests(unittest.TestCase):
             self.request("GET", "/api/profiles", authenticated=False)
         self.assertEqual(raised.exception.code, 401)
 
+    def test_api_does_not_rate_limit_requests(self) -> None:
+        for _ in range(150):
+            status, payload = self.request("GET", "/health")
+            self.assertEqual(status, 200)
+            self.assertEqual(payload, {"status": "ok"})
+
     def test_openapi_documents_every_route_without_authentication(self) -> None:
         status, document = self.request("GET", "/openapi.json", authenticated=False)
         self.assertEqual(status, 200)

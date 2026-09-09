@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import secrets
 import threading
-import time
 import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -34,17 +33,13 @@ class ProfileApiServer:
         port: int = 8765,
         api_key: str | None = None,
         max_body_bytes: int = 65_536,
-        requests_per_minute: int = 120,
     ) -> None:
         self.store = store
         self.worker = worker
         self.browser_service = browser_service
         self.api_key = api_key
         self.max_body_bytes = max_body_bytes
-        self.requests_per_minute = requests_per_minute
         self.operations = OperationRegistry()
-        self._rate_lock = threading.Lock()
-        self._requests: list[float] = []
         self._server = ThreadingHTTPServer((host, port), self._handler_class())
         self._thread = threading.Thread(
             target=self._server.serve_forever, name="profile-api", daemon=True
@@ -93,9 +88,6 @@ class ProfileApiServer:
                     supplied_key = self.headers.get("Authorization", "").removeprefix("Bearer ") or self.headers.get("X-API-Key", "")
                     if api.api_key and not secrets.compare_digest(supplied_key, api.api_key):
                         self._error(HTTPStatus.UNAUTHORIZED, "invalid_api_key", "API key không hợp lệ", request_id)
-                        return
-                    if not api._allow_request():
-                        self._error(HTTPStatus.TOO_MANY_REQUESTS, "rate_limit_exceeded", "Vượt giới hạn request", request_id)
                         return
                     parts = path.split("/")
                     if path == "/health" and method == "GET":
@@ -217,11 +209,3 @@ class ProfileApiServer:
 
         return Handler
 
-    def _allow_request(self) -> bool:
-        now = time.monotonic()
-        with self._rate_lock:
-            self._requests = [item for item in self._requests if now - item < 60]
-            if len(self._requests) >= self.requests_per_minute:
-                return False
-            self._requests.append(now)
-            return True

@@ -177,7 +177,7 @@ Profile response không trả `fingerprint_seed`. Không thể sửa hoặc xóa
 
 - `200` thành công; `201` đã tạo profile; `202` đã nhận lifecycle operation.
 - `400` body/tham số không hợp lệ; `401` API key sai/thiếu; `404` resource không tồn tại.
-- `413` body vượt 64 KiB; `429` vượt requests/phút; `500` lỗi nội bộ đã ẩn chi tiết; `503` readiness thất bại.
+- `413` body vượt 64 KiB; `500` lỗi nội bộ đã ẩn chi tiết; `503` readiness thất bại.
 
 Error envelope:
 
@@ -191,7 +191,9 @@ Error envelope:
 }
 ```
 
-Settings cho phép cấu hình launch đồng thời (`1–20`), tổng browser (`launch–100`) và rate limit (`10–10000` request/phút). Giới hạn session thực tế vẫn phụ thuộc license/tier CloakBrowser.
+Settings cho phép cấu hình launch đồng thời (`1–20`) và tổng browser
+(`launch–100`). Local API không giới hạn số request/phút; giới hạn session thực
+tế vẫn phụ thuộc license/tier CloakBrowser.
 
 ## Dữ liệu
 

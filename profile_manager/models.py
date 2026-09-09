@@ -116,7 +116,6 @@ class AppSettings:
     api_port: int = 8765
     api_key: str = ""
     max_concurrent_launches: int = 2
-    requests_per_minute: int = 120
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -130,5 +129,4 @@ class AppSettings:
             api_port=int(data.get("api_port") or 8765),
             api_key=str(data.get("api_key") or ""),
             max_concurrent_launches=int(data.get("max_concurrent_launches") or 2),
-            requests_per_minute=int(data.get("requests_per_minute") or 120),
         )

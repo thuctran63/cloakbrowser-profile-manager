@@ -65,7 +65,7 @@ def main() -> None:
         profile = store.create_profile("Real API geometry test")
         worker = AsyncWorker()
         service = BrowserService(lambda *_args: None)
-        server = ProfileApiServer(store, worker, service, port=0, requests_per_minute=1000)
+        server = ProfileApiServer(store, worker, service, port=0)
         server.start()
         try:
             status, accepted = request(

@@ -23,7 +23,6 @@ def build_openapi(server_url: str) -> dict[str, Any]:
         "401": _response("Missing or invalid API key", "ErrorResponse"),
         "404": _response("Resource not found", "ErrorResponse"),
         "413": _response("Request body exceeds 64 KiB", "ErrorResponse"),
-        "429": _response("Request rate limit exceeded", "ErrorResponse"),
         "500": _response("Internal server error", "ErrorResponse"),
     }
     profile_id = {

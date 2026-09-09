@@ -39,7 +39,6 @@ class ProfileManagerApp:
             host=api_settings.api_host,
             port=api_settings.api_port,
             api_key=api_settings.api_key or None,
-            requests_per_minute=api_settings.requests_per_minute,
         )
         self.api_server.start()
         self.profiles: dict[str, ProfileConfig] = {}
@@ -206,7 +205,6 @@ class ProfileManagerApp:
                 host=dialog.result.api_host,
                 port=dialog.result.api_port,
                 api_key=dialog.result.api_key or None,
-                requests_per_minute=dialog.result.requests_per_minute,
             )
             self.api_server.start()
             self.status_var.set(f"Đã lưu settings · API: {self.api_server.address}")
