@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 
 class RuntimeState(str, Enum):
@@ -53,10 +54,11 @@ class OpenOptions:
     width: int | None = None
     height: int | None = None
     page_zoom: float | None = None
+    start_url: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "OpenOptions":
-        allowed = {"pos_x", "pos_y", "width", "height", "page_zoom"}
+        allowed = {"pos_x", "pos_y", "width", "height", "page_zoom", "start_url"}
         unknown = set(data) - allowed
         if unknown:
             raise ValueError(f"Open options không hợp lệ: {', '.join(sorted(unknown))}")
@@ -91,7 +93,20 @@ class OpenOptions:
         page_zoom = float(raw_zoom) if raw_zoom is not None else None
         if page_zoom is not None and not 25 <= page_zoom <= 100:
             raise ValueError("page_zoom phải nằm trong khoảng 25–100 phần trăm")
-        return cls(pos_x, pos_y, width, height, page_zoom)
+
+        raw_start_url = data.get("start_url")
+        if raw_start_url is not None and not isinstance(raw_start_url, str):
+            raise ValueError("start_url phải là chuỗi")
+        start_url = raw_start_url.strip() if raw_start_url is not None else None
+        if start_url == "":
+            start_url = None
+        if start_url is not None:
+            if len(start_url) > 2048:
+                raise ValueError("start_url không được dài quá 2048 ký tự")
+            parsed_url = urlsplit(start_url)
+            if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
+                raise ValueError("start_url phải là URL http hoặc https hợp lệ")
+        return cls(pos_x, pos_y, width, height, page_zoom, start_url)
 
 
 @dataclass(slots=True)

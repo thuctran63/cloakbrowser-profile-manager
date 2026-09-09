@@ -85,6 +85,8 @@ class BrowserService:
                 launch_args.append(f"--window-position={options.pos_x},{options.pos_y}")
             if options.width is not None:
                 launch_args.append(f"--window-size={options.width},{options.height}")
+            if options.start_url is not None:
+                launch_args.append(f"--app={options.start_url}")
             async with self._launch_slots:
                 context = await launch_persistent_context_async(
                     profile.user_data_dir,

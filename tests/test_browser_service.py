@@ -153,6 +153,7 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
         async def launch(*_args, **kwargs):
             self.assertIn("--window-position=8,365", kwargs["args"])
             self.assertIn("--window-size=470,349", kwargs["args"])
+            self.assertIn("--app=https://www.facebook.com", kwargs["args"])
             return context
 
         options = OpenOptions(
@@ -161,6 +162,7 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
             width=470,
             height=349,
             page_zoom=75,
+            start_url="https://www.facebook.com",
         )
         with patch("profile_manager.browser_service.launch_persistent_context_async", launch), patch(
             "profile_manager.browser_service.discover_cdp_url", return_value="http://127.0.0.1:9222"

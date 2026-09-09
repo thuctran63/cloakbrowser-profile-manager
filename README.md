@@ -94,7 +94,8 @@ Có thể truyền vị trí, kích thước cửa sổ native và mức page zo
 	"pos_y": 8,
 	"width": 470,
 	"height": 349,
-	"page_zoom": 75
+	"page_zoom": 75,
+	"start_url": "https://www.facebook.com"
 }
 ```
 
@@ -106,6 +107,10 @@ zoom. `pos_x` phải đi cùng `pos_y`;
 áp dụng runtime, không thay đổi fingerprint hoặc metadata profile. Chromium và
 Windows có thể tự nâng kích thước quá nhỏ lên kích thước cửa sổ tối thiểu theo
 DPI/theme hiện tại.
+
+Khi truyền `start_url` (`http://` hoặc `https://`), browser khởi động bằng Chromium
+app mode: không có tab bar, thanh địa chỉ hoặc toolbar. Bỏ `start_url` để mở cửa
+sổ Chromium bình thường. App mode chỉ được quyết định lúc khởi động profile.
 
 Response `202 Accepted` có `Location` và `Retry-After: 1`:
 

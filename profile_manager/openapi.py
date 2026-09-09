@@ -182,13 +182,14 @@ def build_openapi(server_url: str) -> dict[str, Any]:
                 "OpenOptions": {
                     "type": "object",
                     "additionalProperties": False,
-                    "description": "Runtime-only native window geometry and native Chromium page zoom in percent. Position and size values must be supplied in pairs. Browser viewport emulation is not used.",
+                    "description": "Runtime-only native window geometry and native Chromium page zoom in percent. When start_url is supplied, Chromium opens it in app mode without tabs, address bar, or toolbar. Position and size values must be supplied in pairs. Browser viewport emulation is not used.",
                     "properties": {
                         "pos_x": {"type": "integer", "minimum": -100000, "maximum": 100000, "examples": [8]},
                         "pos_y": {"type": "integer", "minimum": -100000, "maximum": 100000, "examples": [8]},
                         "width": {"type": "integer", "minimum": 100, "maximum": 10000, "examples": [470]},
                         "height": {"type": "integer", "minimum": 100, "maximum": 10000, "examples": [349]},
                         "page_zoom": {"type": "number", "minimum": 25, "maximum": 100, "examples": [75]},
+                        "start_url": {"type": "string", "format": "uri", "maxLength": 2048, "pattern": "^https?://", "examples": ["https://www.facebook.com"]},
                     },
                 },
                 "ProfileList": {"type": "object", "required": ["profiles"], "properties": {"profiles": {"type": "array", "items": {"$ref": "#/components/schemas/Profile"}}}},

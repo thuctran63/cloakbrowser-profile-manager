@@ -112,6 +112,7 @@ class ProfileApiServerTests(unittest.TestCase):
                 "width": 470,
                 "height": 349,
                 "page_zoom": 75,
+                "start_url": "https://www.facebook.com",
             },
         )
         self.assertEqual(status, 202)
@@ -126,6 +127,7 @@ class ProfileApiServerTests(unittest.TestCase):
         self.assertEqual(received_options[0].pos_x, 8)
         self.assertEqual(received_options[0].width, 470)
         self.assertEqual(received_options[0].page_zoom, 75)
+        self.assertEqual(received_options[0].start_url, "https://www.facebook.com")
 
     def test_open_rejects_incomplete_geometry(self) -> None:
         _, profile = self.request("POST", "/api/profiles", {"name": "Geometry"})
@@ -134,6 +136,16 @@ class ProfileApiServerTests(unittest.TestCase):
                 "POST",
                 f"/api/v1/profiles/{profile['id']}/operations/open",
                 {"pos_x": 8},
+            )
+        self.assertEqual(raised.exception.code, 400)
+
+    def test_open_rejects_invalid_start_url(self) -> None:
+        _, profile = self.request("POST", "/api/profiles", {"name": "App mode"})
+        with self.assertRaises(HTTPError) as raised:
+            self.request(
+                "POST",
+                f"/api/v1/profiles/{profile['id']}/operations/open",
+                {"start_url": "file:///etc/passwd"},
             )
         self.assertEqual(raised.exception.code, 400)
 

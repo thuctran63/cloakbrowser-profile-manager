@@ -78,6 +78,7 @@ def main() -> None:
                     "width": 600,
                     "height": 400,
                     "page_zoom": 75,
+                    "start_url": f"http://127.0.0.1:{web_server.server_port}/",
                 },
             )
             assert status == 202
@@ -89,7 +90,7 @@ def main() -> None:
                 browser = playwright.chromium.connect_over_cdp(cdp_url)
                 context = browser.contexts[0]
                 page = context.pages[0]
-                page.goto(f"http://127.0.0.1:{web_server.server_port}/")
+                page.wait_for_url(f"http://127.0.0.1:{web_server.server_port}/")
                 page.wait_for_timeout(500)
                 metrics = page.evaluate("""({
                     innerWidth,
