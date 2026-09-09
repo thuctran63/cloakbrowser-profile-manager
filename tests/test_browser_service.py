@@ -48,12 +48,16 @@ class FakePage:
     def __init__(self) -> None:
         self.main_frame = object()
         self.handlers = {}
+        self.goto_urls = []
 
     def on(self, event, handler) -> None:
         self.handlers[event] = handler
 
     async def evaluate(self, script):
         self.evaluated_script = script
+
+    async def goto(self, url):
+        self.goto_urls.append(url)
 
     def is_closed(self) -> bool:
         return False
@@ -153,7 +157,8 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
         async def launch(*_args, **kwargs):
             self.assertIn("--window-position=8,365", kwargs["args"])
             self.assertIn("--window-size=470,349", kwargs["args"])
-            self.assertIn("--app=https://www.facebook.com", kwargs["args"])
+            self.assertIn("--app=about:blank", kwargs["args"])
+            self.assertNotIn("--app=https://www.facebook.com", kwargs["args"])
             return context
 
         options = OpenOptions(
@@ -179,6 +184,10 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
             preferences["partition"]["default_zoom_level"]["x"], expected_level
         )
         self.assertFalse(hasattr(context, "init_script"))
+        self.assertEqual(
+            context.pages[0].goto_urls,
+            ["https://www.facebook.com"],
+        )
         self.assertIn(
             (
                 "Browser.setWindowBounds",

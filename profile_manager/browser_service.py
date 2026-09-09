@@ -86,7 +86,11 @@ class BrowserService:
             if options.width is not None:
                 launch_args.append(f"--window-size={options.width},{options.height}")
             if options.start_url is not None:
-                launch_args.append(f"--app={options.start_url}")
+                # Chromium begins --app URL navigation before Playwright has
+                # attached Fetch.authRequired handlers. Bootstrap locally so
+                # authenticated proxy credentials are ready for the first
+                # request to the requested URL.
+                launch_args.append("--app=about:blank")
             async with self._launch_slots:
                 context = await launch_persistent_context_async(
                     profile.user_data_dir,
@@ -107,6 +111,8 @@ class BrowserService:
             )
             if not context.pages:
                 await context.new_page()
+            if options.start_url is not None:
+                await context.pages[0].goto(options.start_url)
             await self._apply_open_options(context, options)
             self._set_state(profile.id, RuntimeState.RUNNING)
             return cdp_url
