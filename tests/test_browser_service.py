@@ -87,11 +87,16 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
         async def launch(*args, **kwargs):
             self.assertEqual(args[0], self.profile.user_data_dir)
             self.assertEqual(
-                kwargs["args"][:2],
-                ["--fingerprint=54321", "--fingerprint-platform=windows"],
+                kwargs["args"][:4],
+                [
+                    "--fingerprint=54321",
+                    "--fingerprint-platform=windows",
+                    "--disable-notifications",
+                    "--mute-audio",
+                ],
             )
-            self.assertRegex(kwargs["args"][2], r"^--remote-debugging-port=\d+$")
-            self.assertEqual(kwargs["args"][3], "--remote-debugging-address=127.0.0.1")
+            self.assertRegex(kwargs["args"][4], r"^--remote-debugging-port=\d+$")
+            self.assertEqual(kwargs["args"][5], "--remote-debugging-address=127.0.0.1")
             self.assertEqual(kwargs["proxy"], self.profile.proxy)
             self.assertFalse(kwargs["stealth_args"])
             self.assertTrue(kwargs["chromium_sandbox"])

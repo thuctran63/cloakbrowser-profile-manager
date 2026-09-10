@@ -78,6 +78,8 @@ class BrowserService:
             launch_args = [
                 f"--fingerprint={profile.fingerprint_seed}",
                 "--fingerprint-platform=windows",
+                "--disable-notifications",
+                "--mute-audio",
                 "--remote-debugging-port=0",
                 "--remote-debugging-address=127.0.0.1",
             ]
