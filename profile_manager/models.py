@@ -9,6 +9,66 @@ from typing import Any
 from urllib.parse import urlsplit
 
 
+RELEASE_CHANNELS = {"stable", "preview"}
+HUMAN_PRESETS = {"default", "careful"}
+
+
+def _optional_text(value: Any, field: str, *, maximum: int = 128) -> str | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field} phải là chuỗi")
+    value = value.strip()
+    if len(value) > maximum:
+        raise ValueError(f"{field} tối đa {maximum} ký tự")
+    return value or None
+
+
+@dataclass(frozen=True, slots=True)
+class ProfileSettings:
+    """Validated, user-editable profile identity settings."""
+
+    geoip: bool = True
+    timezone: str | None = None
+    locale: str | None = None
+    release_channel: str = "stable"
+    browser_version: str | None = None
+    humanize: bool = False
+    human_preset: str = "default"
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], *, partial: bool = False) -> "ProfileSettings":
+        allowed = {
+            "geoip", "timezone", "locale", "release_channel",
+            "browser_version", "humanize", "human_preset",
+        }
+        unknown = set(data) - allowed
+        if unknown:
+            raise ValueError(f"Thiết lập profile không hợp lệ: {', '.join(sorted(unknown))}")
+
+        def boolean(name: str, default: bool) -> bool:
+            value = data.get(name, default)
+            if not isinstance(value, bool):
+                raise ValueError(f"{name} phải là boolean")
+            return value
+
+        channel = data.get("release_channel", "stable")
+        preset = data.get("human_preset", "default")
+        if not isinstance(channel, str) or channel not in RELEASE_CHANNELS:
+            raise ValueError("release_channel phải là stable hoặc preview")
+        if not isinstance(preset, str) or preset not in HUMAN_PRESETS:
+            raise ValueError("human_preset phải là default hoặc careful")
+        return cls(
+            geoip=boolean("geoip", True),
+            timezone=_optional_text(data.get("timezone"), "timezone"),
+            locale=_optional_text(data.get("locale"), "locale", maximum=35),
+            release_channel=channel,
+            browser_version=_optional_text(data.get("browser_version"), "browser_version", maximum=64),
+            humanize=boolean("humanize", False),
+            human_preset=preset,
+        )
+
+
 class RuntimeState(str, Enum):
     STOPPED = "Stopped"
     STARTING = "Starting"
@@ -26,6 +86,13 @@ class ProfileConfig:
     data_dir: str
     created_at: str
     updated_at: str
+    geoip: bool = True
+    timezone: str | None = None
+    locale: str | None = None
+    release_channel: str = "stable"
+    browser_version: str | None = None
+    humanize: bool = False
+    human_preset: str = "default"
 
     @property
     def user_data_dir(self) -> Path:
@@ -34,8 +101,21 @@ class ProfileConfig:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    @property
+    def settings(self) -> ProfileSettings:
+        return ProfileSettings(
+            self.geoip, self.timezone, self.locale, self.release_channel,
+            self.browser_version, self.humanize, self.human_preset,
+        )
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ProfileConfig":
+        settings = ProfileSettings.from_dict(
+            {key: data[key] for key in (
+                "geoip", "timezone", "locale", "release_channel", "browser_version",
+                "humanize", "human_preset",
+            ) if key in data}
+        )
         return cls(
             id=str(data["id"]),
             name=str(data["name"]),
@@ -44,6 +124,13 @@ class ProfileConfig:
             data_dir=str(data["data_dir"]),
             created_at=str(data["created_at"]),
             updated_at=str(data["updated_at"]),
+            geoip=settings.geoip,
+            timezone=settings.timezone,
+            locale=settings.locale,
+            release_channel=settings.release_channel,
+            browser_version=settings.browser_version,
+            humanize=settings.humanize,
+            human_preset=settings.human_preset,
         )
 
 

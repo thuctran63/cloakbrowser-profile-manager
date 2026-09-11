@@ -3,6 +3,8 @@ from __future__ import annotations
 import tempfile
 import threading
 import unittest
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from profile_manager.models import AppSettings
@@ -23,6 +25,8 @@ class ProfileStoreTests(unittest.TestCase):
         self.assertTrue(profile.user_data_dir.is_dir())
         self.assertGreaterEqual(profile.fingerprint_seed, 10_000)
         self.assertLessEqual(profile.fingerprint_seed, 99_999)
+        self.assertTrue(profile.geoip)
+        self.assertEqual(profile.release_channel, "stable")
 
         updated = self.store.update_profile(profile.id, "Updated", "")
         self.assertEqual(updated.name, "Updated")
@@ -83,6 +87,26 @@ class ProfileStoreTests(unittest.TestCase):
         self.assertEqual(migrated.list_profiles()[0].id, profile.id)
         self.assertTrue((app_dir / "profiles.json.migrated").exists())
         self.assertEqual(len(ProfileStore(app_dir, Path(self.temp.name) / "legacy-profiles").list_profiles()), 1)
+
+    def test_migrates_v2_profiles_with_automatic_geoip(self) -> None:
+        app_dir = Path(self.temp.name) / "v2-app"
+        app_dir.mkdir()
+        database = app_dir / "profiles.db"
+        with closing(sqlite3.connect(database)) as connection:
+            connection.execute("CREATE TABLE profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL, proxy TEXT, fingerprint_seed INTEGER NOT NULL, data_dir TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)")
+            connection.execute("PRAGMA user_version=2")
+            connection.commit()
+        migrated = ProfileStore(app_dir, Path(self.temp.name) / "v2-profiles")
+        with closing(sqlite3.connect(database)) as connection:
+            cursor = connection.cursor()
+            try:
+                version = cursor.execute("PRAGMA user_version").fetchone()[0]
+                rows = cursor.execute("PRAGMA table_info(profiles)").fetchall()
+            finally:
+                cursor.close()
+            self.assertEqual(version, 3)
+            columns = {row[1] for row in rows}
+        self.assertIn("geoip", columns)
 
 
 if __name__ == "__main__":

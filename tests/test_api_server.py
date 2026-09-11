@@ -42,27 +42,27 @@ class ProfileApiServerTests(unittest.TestCase):
             return response.status, json.load(response)
 
     def test_profile_crud(self) -> None:
-        status, created = self.request("POST", "/api/profiles", {"name": "API profile"})
+        status, created = self.request("POST", "/api/v1/profiles", {"name": "API profile"})
         self.assertEqual(status, 201)
         self.assertNotIn("fingerprint_seed", created)
 
-        status, listed = self.request("GET", "/api/profiles")
+        status, listed = self.request("GET", "/api/v1/profiles")
         self.assertEqual(status, 200)
         self.assertEqual(listed["profiles"][0]["id"], created["id"])
 
         status, updated = self.request(
-            "PATCH", f"/api/profiles/{created['id']}", {"name": "Updated"}
+            "PATCH", f"/api/v1/profiles/{created['id']}", {"name": "Updated"}
         )
         self.assertEqual(status, 200)
         self.assertEqual(updated["name"], "Updated")
 
-        status, deleted = self.request("DELETE", f"/api/profiles/{created['id']}")
+        status, deleted = self.request("DELETE", f"/api/v1/profiles/{created['id']}")
         self.assertEqual(status, 200)
         self.assertTrue(deleted["deleted"])
 
     def test_requires_api_key(self) -> None:
         with self.assertRaises(HTTPError) as raised:
-            self.request("GET", "/api/profiles", authenticated=False)
+            self.request("GET", "/api/v1/profiles", authenticated=False)
         self.assertEqual(raised.exception.code, 401)
 
     def test_api_does_not_rate_limit_requests(self) -> None:
@@ -71,8 +71,8 @@ class ProfileApiServerTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(payload, {"status": "ok"})
 
-    def test_openapi_documents_every_route_without_authentication(self) -> None:
-        status, document = self.request("GET", "/openapi.json", authenticated=False)
+    def test_openapi_documents_every_route(self) -> None:
+        status, document = self.request("GET", "/openapi.json")
         self.assertEqual(status, 200)
         self.assertEqual(document["openapi"], "3.1.0")
         expected = {
@@ -80,19 +80,21 @@ class ProfileApiServerTests(unittest.TestCase):
             "/health/live",
             "/health/ready",
             "/api/v1/status",
+            "/api/v1/diagnostics",
             "/api/v1/operations/{operation_id}",
             "/api/v1/profiles/{profile_id}/operations/open",
             "/api/v1/profiles/{profile_id}/operations/close",
-            "/api/profiles",
-            "/api/profiles/{profile_id}",
+            "/api/v1/profiles/{profile_id}/preflight",
+            "/api/v1/profiles",
+            "/api/v1/profiles/{profile_id}",
         }
         self.assertEqual(set(document["paths"]), expected)
         self.assertEqual(document["servers"][0]["url"], self.server.address)
         self.assertIn("bearerAuth", document["components"]["securitySchemes"])
         self.assertIn("apiKeyAuth", document["components"]["securitySchemes"])
 
-    def test_swagger_ui_is_available_without_authentication(self) -> None:
-        request = Request(self.server.address + "/docs", method="GET")
+    def test_swagger_ui_is_available_with_authentication(self) -> None:
+        request = Request(self.server.address + "/docs", headers={"X-API-Key": "test-key"}, method="GET")
         with urlopen(request, timeout=5) as response:
             content = response.read().decode("utf-8")
         self.assertEqual(response.status, 200)

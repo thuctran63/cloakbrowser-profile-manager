@@ -100,6 +100,9 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(kwargs["extension_paths"])
             self.assertEqual(kwargs["proxy"], self.profile.proxy)
             self.assertFalse(kwargs["stealth_args"])
+            self.assertTrue(kwargs["geoip"])
+            self.assertEqual(kwargs["release_channel"], "stable")
+            self.assertFalse(kwargs["humanize"])
             self.assertTrue(kwargs["chromium_sandbox"])
             return context
 

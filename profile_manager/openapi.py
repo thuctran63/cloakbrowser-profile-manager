@@ -22,6 +22,7 @@ def build_openapi(server_url: str) -> dict[str, Any]:
         "400": _response("Invalid request", "ErrorResponse"),
         "401": _response("Missing or invalid API key", "ErrorResponse"),
         "404": _response("Resource not found", "ErrorResponse"),
+        "405": _response("Method not allowed", "ErrorResponse"),
         "413": _response("Request body exceeds 64 KiB", "ErrorResponse"),
         "500": _response("Internal server error", "ErrorResponse"),
     }
@@ -56,7 +57,7 @@ def build_openapi(server_url: str) -> dict[str, Any]:
             "version": __version__,
             "description": (
                 "Localhost API for persistent profile CRUD, browser lifecycle, and CDP automation. "
-                "Authentication is disabled when no API key is configured. Prefer asynchronous v1 lifecycle endpoints."
+                "An API key is generated automatically. Prefer asynchronous v1 lifecycle endpoints."
             ),
         },
         "servers": [{"url": server_url, "description": "Local profile manager"}],
@@ -85,6 +86,9 @@ def build_openapi(server_url: str) -> dict[str, Any]:
             },
             "/api/v1/status": {
                 "get": operation("Get service capacity and runtime status", "Status", {"200": _response("Current status", "StatusResponse")})
+            },
+            "/api/v1/diagnostics": {
+                "get": operation("Get wrapper, binary and runtime diagnostics", "Status", {"200": _response("Diagnostics", "DiagnosticsResponse")})
             },
             "/api/v1/operations/{operation_id}": {
                 "get": operation(
@@ -115,7 +119,18 @@ def build_openapi(server_url: str) -> dict[str, Any]:
                     parameters=[profile_id],
                 )
             },
-            "/api/profiles": {
+            "/api/v1/profiles/{profile_id}/preflight": {
+                "post": operation(
+                    "Validate proxy and identity alignment",
+                    "Profiles",
+                    {
+                        "200": _response("Preflight succeeded", "PreflightResponse"),
+                        "502": _response("Proxy or identity resolution failed", "PreflightResponse"),
+                    },
+                    parameters=[profile_id],
+                )
+            },
+            "/api/v1/profiles": {
                 "get": operation("List profiles", "Profiles", {"200": _response("Profile list", "ProfileList")}),
                 "post": operation(
                     "Create profile",
@@ -127,7 +142,7 @@ def build_openapi(server_url: str) -> dict[str, Any]:
                     },
                 ),
             },
-            "/api/profiles/{profile_id}": {
+            "/api/v1/profiles/{profile_id}": {
                 "get": operation("Get profile", "Profiles", {"200": _response("Profile", "Profile")}, parameters=[profile_id]),
                 "patch": operation(
                     "Update profile name or proxy",
@@ -156,7 +171,7 @@ def build_openapi(server_url: str) -> dict[str, Any]:
                 "RuntimeState": {"type": "string", "enum": ["Stopped", "Starting", "Running", "Stopping", "Error"]},
                 "Profile": {
                     "type": "object",
-                    "required": ["id", "name", "proxy", "data_dir", "created_at", "updated_at", "status", "cdp_url"],
+                    "required": ["id", "name", "proxy", "data_dir", "created_at", "updated_at", "status", "cdp_url", "geoip", "timezone", "locale", "release_channel", "browser_version", "humanize", "human_preset"],
                     "properties": {
                         "id": {"type": "string", "format": "uuid"},
                         "name": {"type": "string", "maxLength": 80},
@@ -166,17 +181,26 @@ def build_openapi(server_url: str) -> dict[str, Any]:
                         "updated_at": {"type": "string", "format": "date-time"},
                         "status": {"$ref": "#/components/schemas/RuntimeState"},
                         "cdp_url": {"type": ["string", "null"], "format": "uri"},
+                        "geoip": {"type": "boolean"},
+                        "timezone": {"type": ["string", "null"], "maxLength": 128},
+                        "locale": {"type": ["string", "null"], "maxLength": 35},
+                        "release_channel": {"type": "string", "enum": ["stable", "preview"]},
+                        "browser_version": {"type": ["string", "null"], "maxLength": 64},
+                        "humanize": {"type": "boolean"},
+                        "human_preset": {"type": "string", "enum": ["default", "careful"]},
                     },
                 },
                 "ProfileCreate": {
                     "type": "object",
+                    "additionalProperties": False,
                     "required": ["name"],
-                    "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 80}, "proxy": {"type": ["string", "null"]}},
+                    "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 80}, "proxy": {"type": ["string", "null"]}, "geoip": {"type": "boolean", "default": True}, "timezone": {"type": ["string", "null"], "maxLength": 128}, "locale": {"type": ["string", "null"], "maxLength": 35}, "release_channel": {"type": "string", "enum": ["stable", "preview"], "default": "stable"}, "browser_version": {"type": ["string", "null"], "maxLength": 64}, "humanize": {"type": "boolean", "default": False}, "human_preset": {"type": "string", "enum": ["default", "careful"], "default": "default"}},
                 },
                 "ProfileUpdate": {
                     "type": "object",
+                    "additionalProperties": False,
                     "minProperties": 1,
-                    "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 80}, "proxy": {"type": ["string", "null"]}},
+                    "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 80}, "proxy": {"type": ["string", "null"]}, "geoip": {"type": "boolean"}, "timezone": {"type": ["string", "null"], "maxLength": 128}, "locale": {"type": ["string", "null"], "maxLength": 35}, "release_channel": {"type": "string", "enum": ["stable", "preview"]}, "browser_version": {"type": ["string", "null"], "maxLength": 64}, "humanize": {"type": "boolean"}, "human_preset": {"type": "string", "enum": ["default", "careful"]}},
                 },
                 "OpenOptions": {
                     "type": "object",
@@ -209,6 +233,8 @@ def build_openapi(server_url: str) -> dict[str, Any]:
                 },
                 "OperationResponse": {"type": "object", "required": ["data"], "properties": {"data": {"$ref": "#/components/schemas/Operation"}}},
                 "StatusResponse": {"type": "object", "properties": {"data": {"type": "object", "required": ["running", "starting", "active_operations", "worker_alive", "draining"], "properties": {"running": {"type": "integer"}, "starting": {"type": "integer"}, "active_operations": {"type": "integer"}, "worker_alive": {"type": "boolean"}, "draining": {"type": "boolean"}}}}},
+                "DiagnosticsResponse": {"type": "object", "properties": {"data": {"type": "object", "additionalProperties": True}}},
+                "PreflightResponse": {"type": "object", "properties": {"data": {"type": "object", "additionalProperties": True}}},
                 "HealthOk": {"type": "object", "properties": {"status": {"const": "ok"}}},
                 "HealthAlive": {"type": "object", "properties": {"status": {"const": "alive"}}},
                 "HealthReady": {"type": "object", "properties": {"status": {"const": "ready"}}},

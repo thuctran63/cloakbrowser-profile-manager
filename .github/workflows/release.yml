@@ -24,7 +24,7 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}" -replace '^v', ''
-          if (-not $version) { $version = "0.1.0-dev" }
+          if (-not $version -or $version -eq "main") { $version = "" }
           ./scripts/build_release.ps1 -Version $version
       - uses: actions/upload-artifact@v4
         with:

@@ -66,7 +66,7 @@ class SettingsPage(ttk.Frame):
         self.key_entry.grid(row=11, column=0, sticky="ew", pady=(4, 0))
         self.show_key_check = ttk.Checkbutton(frame, text="Hiện", variable=self.show_key_var, command=self._toggle_key)
         self.show_key_check.grid(row=11, column=1, sticky="w", padx=(8, 0))
-        ttk.Label(frame, text="Để trống API key sẽ tắt xác thực. API và CDP chỉ được truy cập từ máy này.", style="Helper.TLabel", wraplength=620).grid(row=12, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(frame, text="API key được tạo tự động. Chỉ xóa hoặc thay đổi khi chủ động xoay khóa.", style="Helper.TLabel", wraplength=620).grid(row=12, column=0, columnspan=2, sticky="w", pady=(6, 0))
         ttk.Label(frame, text="Giới hạn launch đồng thời", style="Surface.TLabel").grid(row=13, column=0, sticky="w", pady=(12, 0))
         self.launches_entry = ttk.Entry(frame, textvariable=self.launches_var, width=12)
         self.launches_entry.grid(row=14, column=0, sticky="w", pady=(4, 0))
@@ -121,7 +121,15 @@ class SettingsPage(ttk.Frame):
         if not 1 <= launches <= 20:
             self._feedback("Giới hạn launch phải nằm trong khoảng 1–20", error=True)
             return None
-        return AppSettings(str(Path(raw).expanduser().resolve()), "127.0.0.1", port, self.api_key_var.get().strip(), launches)
+        api_key = self.api_key_var.get().strip()
+        if not api_key:
+            self._feedback("API key không được để trống", error=True)
+            return None
+        return AppSettings(
+            default_profiles_dir=str(Path(raw).expanduser().resolve()),
+            api_host="127.0.0.1", api_port=port, api_key=api_key,
+            max_concurrent_launches=launches,
+        )
 
     def save(self) -> None:
         if self._disabled:

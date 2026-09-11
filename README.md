@@ -42,6 +42,8 @@ Dependency CloakBrowser được pin vào commit bất biến của custom fork 
 ## Chức năng
 
 - Tạo profile với UUID và fingerprint seed ngẫu nhiên, cố định theo profile.
+- Tự động đồng bộ timezone, locale và WebRTC theo IP thoát; profile cũ cũng được migration sang mặc định này.
+- Cho phép override timezone/locale, chọn `stable`/`preview`, pin phiên bản browser và bật humanization nội bộ.
 - Sửa tên và proxy HTTP/HTTPS/SOCKS5.
 - Xóa toàn bộ metadata, cookie, cache và history sau khi xác nhận.
 - Open/Close nhiều profile độc lập với lock theo profile, launch queue và giới hạn tài nguyên.
@@ -59,8 +61,8 @@ API mặc định chạy tại `http://127.0.0.1:8765`. URL, port và API key đ
 - Swagger UI: `http://127.0.0.1:8765/docs`
 - OpenAPI 3.1 JSON: `http://127.0.0.1:8765/openapi.json`
 
-Hai endpoint tài liệu không yêu cầu API key để Swagger UI có thể tải schema. Các
-endpoint thao tác vẫn yêu cầu xác thực nếu API key đã được cấu hình. Trong
+API key mạnh được tạo tự động ở lần chạy đầu. Endpoint tài liệu cũng yêu cầu API
+key. Trong
 Swagger UI, bấm **Authorize** rồi nhập API key bằng Bearer token hoặc
 `X-API-Key`.
 
@@ -69,7 +71,7 @@ profile CRUD, operation Open/Close bất đồng bộ và polling operation.
 
 ### Xác thực
 
-Nếu API key trong Settings không rỗng, gửi một trong hai header:
+Gửi một trong hai header:
 
 ```http
 Authorization: Bearer <api-key>
@@ -161,8 +163,12 @@ async with async_playwright() as playwright:
 
 Các endpoint CRUD:
 
-- `GET/POST /api/profiles`
-- `GET/PATCH/DELETE /api/profiles/{id}`
+- `GET/POST /api/v1/profiles`
+- `GET/PATCH/DELETE /api/v1/profiles/{id}`
+
+Route `/api/profiles` cũ vẫn được giữ để tương thích. Payload hỗ trợ `geoip`,
+`timezone`, `locale`, `release_channel`, `browser_version`, `humanize` và
+`human_preset`; thuộc tính lạ bị từ chối.
 
 Profile response không trả `fingerprint_seed`. Không thể sửa hoặc xóa profile khi browser không ở trạng thái `Stopped`.
 
@@ -172,6 +178,8 @@ Profile response không trả `fingerprint_seed`. Không thể sửa hoặc xóa
 - `GET /health/live` — HTTP server đang sống.
 - `GET /health/ready` — database, worker sẵn sàng và service chưa draining.
 - `GET /api/v1/status` — số profile `starting`, `running`, active operations và trạng thái worker/draining.
+- `GET /api/v1/diagnostics` — wrapper, binary, tier, platform và runtime.
+- `POST /api/v1/profiles/{id}/preflight` — kiểm tra IP thoát và tính nhất quán identity trước khi launch.
 
 ### Status code và lỗi
 
@@ -202,6 +210,10 @@ Mặc định metadata nằm trong `.profile-manager/profiles.db` (SQLite/WAL); 
 Proxy có thể nhập dưới dạng `http://user:pass@host:port` hoặc `socks5://host:port`. Proxy vẫn được lưu local dạng plain text trong SQLite; không commit `.profile-manager`, không dùng API/CDP trên máy dùng chung và không log credential.
 
 Chromium nhận `--remote-debugging-port=0`; ứng dụng đọc file `DevToolsActivePort` mới và xác thực `/json/version` trước khi công bố CDP URL. Cách này tránh race do chọn trước một free port.
+
+Humanization chỉ bọc thao tác Playwright chạy trong process Profile Manager.
+Client ngoài kết nối qua CDP phải tự humanize chuột, bàn phím và scroll ở phía
+client; lớp này không tự truyền qua CDP.
 
 ## Tests
 

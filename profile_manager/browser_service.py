@@ -10,7 +10,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from cloakbrowser import launch_persistent_context_async
+from cloakbrowser import __version__ as cloakbrowser_version
+from cloakbrowser import binary_info, launch_persistent_context_async, maybe_resolve_geoip
 
 from .extensions import ExtensionInfo, ExtensionLibrary, ImportResult
 from .models import OpenOptions, ProfileConfig, RuntimeState
@@ -49,6 +50,44 @@ class BrowserService:
 
     def cdp_url(self, profile_id: str) -> str | None:
         return self._cdp_urls.get(profile_id)
+
+    async def preflight(self, profile: ProfileConfig) -> dict[str, Any]:
+        """Resolve the launch identity without starting Chromium."""
+        try:
+            timezone, locale, exit_ip = await asyncio.to_thread(
+                maybe_resolve_geoip,
+                profile.geoip,
+                profile.proxy,
+                profile.timezone,
+                profile.locale,
+                None,
+            )
+        except Exception as exc:
+            message = redact_proxy_in_text(str(exc), profile.proxy)
+            return {"ok": False, "error": message}
+        return {
+            "ok": True,
+            "proxy_configured": bool(profile.proxy),
+            "geoip": profile.geoip,
+            "timezone": timezone,
+            "locale": locale,
+            "exit_ip": exit_ip,
+            "webrtc_aligned": bool(exit_ip) if profile.proxy else True,
+        }
+
+    async def diagnostics(self, profile: ProfileConfig | None = None) -> dict[str, Any]:
+        info = await asyncio.to_thread(
+            binary_info,
+            profile.browser_version if profile else None,
+            profile.release_channel if profile else None,
+        )
+        return {
+            "wrapper_version": cloakbrowser_version,
+            "binary": info,
+            "runtime": {**self.counts(), "draining": self.draining},
+            "profile_id": profile.id if profile else None,
+            "release_channel": profile.release_channel if profile else "stable",
+        }
 
     async def open(
         self, profile: ProfileConfig, options: OpenOptions | None = None
@@ -104,6 +143,13 @@ class BrowserService:
                     stealth_args=False,
                     args=launch_args,
                     extension_paths=extension_paths or None,
+                    geoip=profile.geoip,
+                    timezone=profile.timezone,
+                    locale=profile.locale,
+                    browser_version=profile.browser_version,
+                    release_channel=profile.release_channel,
+                    humanize=profile.humanize,
+                    human_preset=profile.human_preset,
                     chromium_sandbox=True,
                 )
             self._contexts[profile.id] = context
@@ -197,17 +243,19 @@ class BrowserService:
             options.pos_x is not None or options.width is not None
         ):
             session = await context.new_cdp_session(context.pages[0])
-            window = await session.send("Browser.getWindowForTarget")
-            bounds: dict[str, int | str] = {"windowState": "normal"}
-            if options.pos_x is not None:
-                bounds.update(left=options.pos_x, top=options.pos_y)
-            if options.width is not None:
-                bounds.update(width=options.width, height=options.height)
-            await session.send(
-                "Browser.setWindowBounds",
-                {"windowId": window["windowId"], "bounds": bounds},
-            )
-            await session.detach()
+            try:
+                window = await session.send("Browser.getWindowForTarget")
+                bounds: dict[str, int | str] = {"windowState": "normal"}
+                if options.pos_x is not None:
+                    bounds.update(left=options.pos_x, top=options.pos_y)
+                if options.width is not None:
+                    bounds.update(width=options.width, height=options.height)
+                await session.send(
+                    "Browser.setWindowBounds",
+                    {"windowId": window["windowId"], "bounds": bounds},
+                )
+            finally:
+                await session.detach()
 
     @staticmethod
     def _write_native_page_zoom(user_data_dir: Any, percent: float) -> None:

@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .browser_service import BrowserService
-from .models import OpenOptions, ProfileConfig
+from .models import OpenOptions, ProfileConfig, ProfileSettings
 from .openapi import SWAGGER_UI_HTML, build_openapi
 from .operations import OperationRegistry
 from .profile_store import ProfileStore
@@ -79,15 +79,15 @@ class ProfileApiServer:
                 request_id = str(uuid.uuid4())
                 try:
                     path = urlparse(self.path).path.rstrip("/") or "/"
+                    supplied_key = self.headers.get("Authorization", "").removeprefix("Bearer ") or self.headers.get("X-API-Key", "")
+                    if api.api_key and not secrets.compare_digest(supplied_key, api.api_key):
+                        self._error(HTTPStatus.UNAUTHORIZED, "invalid_api_key", "API key không hợp lệ", request_id)
+                        return
                     if path == "/openapi.json" and method == "GET":
                         self._json(HTTPStatus.OK, build_openapi(api.address))
                         return
                     if path == "/docs" and method == "GET":
                         self._html(HTTPStatus.OK, SWAGGER_UI_HTML)
-                        return
-                    supplied_key = self.headers.get("Authorization", "").removeprefix("Bearer ") or self.headers.get("X-API-Key", "")
-                    if api.api_key and not secrets.compare_digest(supplied_key, api.api_key):
-                        self._error(HTTPStatus.UNAUTHORIZED, "invalid_api_key", "API key không hợp lệ", request_id)
                         return
                     parts = path.split("/")
                     if path == "/health" and method == "GET":
@@ -99,20 +99,29 @@ class ProfileApiServer:
                         self._json(HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE, {"status": "ready" if ready else "not_ready"})
                     elif path == "/api/v1/status" and method == "GET":
                         self._json(HTTPStatus.OK, {"data": {**api.browser_service.counts(), "active_operations": api.operations.active_count(), "worker_alive": api.worker.is_alive, "draining": api.browser_service.draining}})
+                    elif path == "/api/v1/diagnostics" and method == "GET":
+                        result = api.worker.submit(api.browser_service.diagnostics()).result(timeout=30)
+                        self._json(HTTPStatus.OK, {"data": result})
                     elif len(parts) == 5 and parts[1:4] == ["api", "v1", "operations"] and method == "GET":
                         self._json(HTTPStatus.OK, {"data": api.operations.get(parts[4]).to_dict()})
                     elif len(parts) == 7 and parts[1:4] == ["api", "v1", "profiles"] and parts[5] == "operations":
                         self._operation_route(method, parts[4], parts[6])
-                    elif path == "/api/profiles" and method == "GET":
+                    elif len(parts) == 6 and parts[1:4] == ["api", "v1", "profiles"] and parts[5] == "preflight" and method == "POST":
+                        profile = self._find_profile(parts[4])
+                        result = api.worker.submit(api.browser_service.preflight(profile)).result(timeout=60)
+                        self._json(HTTPStatus.OK if result["ok"] else HTTPStatus.BAD_GATEWAY, {"data": result})
+                    elif path in {"/api/profiles", "/api/v1/profiles"} and method == "GET":
                         self._json(HTTPStatus.OK, {"profiles": [self._profile(item) for item in api.store.list_profiles()]})
-                    elif path == "/api/profiles" and method == "POST":
-                        body = self._body()
-                        profile = api.store.create_profile(str(body.get("name", "")), str(body.get("proxy", "")))
+                    elif path in {"/api/profiles", "/api/v1/profiles"} and method == "POST":
+                        name, proxy, settings = self._profile_payload(self._body())
+                        profile = api.store.create_profile(name, proxy, settings)
                         self._json(HTTPStatus.CREATED, self._profile(profile))
                     elif len(parts) == 4 and parts[1:3] == ["api", "profiles"]:
-                        self._profile_route(method, parts[3])
+                        self._profile_route(method, parts[3], request_id)
+                    elif len(parts) == 5 and parts[1:4] == ["api", "v1", "profiles"]:
+                        self._profile_route(method, parts[4], request_id)
                     else:
-                        self._json(HTTPStatus.NOT_FOUND, {"error": "Endpoint không tồn tại"})
+                        self._error(HTTPStatus.NOT_FOUND, "not_found", "Endpoint không tồn tại", request_id)
                 except KeyError as exc:
                     self._error(HTTPStatus.NOT_FOUND, "not_found", str(exc), request_id)
                 except PayloadTooLargeError as exc:
@@ -122,16 +131,17 @@ class ProfileApiServer:
                 except Exception:
                     self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error", "Lỗi nội bộ", request_id)
 
-            def _profile_route(self, method: str, profile_id: str) -> None:
+            def _profile_route(self, method: str, profile_id: str, request_id: str) -> None:
                 profile = self._find_profile(profile_id)
                 if method == "GET":
                     self._json(HTTPStatus.OK, self._profile(profile))
                 elif method == "PATCH":
                     body = self._body()
+                    if not body:
+                        raise ValueError("PATCH body không được để trống")
+                    name, proxy, settings = self._profile_payload(body, current=profile)
                     updated = api.store.update_profile(
-                        profile_id,
-                        str(body.get("name", profile.name)),
-                        str(body.get("proxy", profile.proxy or "")),
+                        profile_id, name, proxy, settings,
                     )
                     self._json(HTTPStatus.OK, self._profile(updated))
                 elif method == "DELETE":
@@ -140,7 +150,13 @@ class ProfileApiServer:
                     api.store.delete_profile(profile_id)
                     self._json(HTTPStatus.OK, {"deleted": True})
                 else:
-                    self._json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "Method không hợp lệ"})
+                    self._error(
+                        HTTPStatus.METHOD_NOT_ALLOWED,
+                        "method_not_allowed",
+                        "Method không hợp lệ",
+                        request_id,
+                        {"Allow": "GET, PATCH, DELETE"},
+                    )
 
             def _operation_route(self, method: str, profile_id: str, action: str) -> None:
                 if method != "POST" or action not in {"open", "close"}:
@@ -159,13 +175,33 @@ class ProfileApiServer:
                 self._send_json_headers(payload)
 
             def _find_profile(self, profile_id: str) -> ProfileConfig:
-                for profile in api.store.list_profiles():
-                    if profile.id == profile_id:
-                        return profile
-                raise KeyError("Không tìm thấy profile")
+                return api.store.get_profile(profile_id)
+
+            def _profile_payload(
+                self, body: dict[str, Any], current: ProfileConfig | None = None
+            ) -> tuple[str, str, ProfileSettings]:
+                allowed = {"name", "proxy", "geoip", "timezone", "locale", "release_channel", "browser_version", "humanize", "human_preset"}
+                unknown = set(body) - allowed
+                if unknown:
+                    raise ValueError(f"Thuộc tính profile không hợp lệ: {', '.join(sorted(unknown))}")
+                name = body.get("name", current.name if current else "")
+                proxy = body.get("proxy", current.proxy if current else "")
+                if not isinstance(name, str):
+                    raise ValueError("name phải là chuỗi")
+                if proxy is not None and not isinstance(proxy, str):
+                    raise ValueError("proxy phải là chuỗi hoặc null")
+                base = current.settings if current else ProfileSettings()
+                values = {
+                    key: body.get(key, getattr(base, key))
+                    for key in ("geoip", "timezone", "locale", "release_channel", "browser_version", "humanize", "human_preset")
+                }
+                return name, proxy or "", ProfileSettings.from_dict(values)
 
             def _body(self) -> dict[str, Any]:
-                length = int(self.headers.get("Content-Length", "0"))
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError as exc:
+                    raise ValueError("Content-Length không hợp lệ") from exc
                 if length < 0 or length > api.max_body_bytes:
                     raise PayloadTooLargeError("Request body quá lớn")
                 if length == 0:
@@ -201,8 +237,19 @@ class ProfileApiServer:
                 self.end_headers()
                 self.wfile.write(encoded)
 
-            def _error(self, status: HTTPStatus, code: str, message: str, request_id: str) -> None:
-                self._json(status, {"error": {"code": code, "message": message, "request_id": request_id}})
+            def _error(
+                self,
+                status: HTTPStatus,
+                code: str,
+                message: str,
+                request_id: str,
+                headers: dict[str, str] | None = None,
+            ) -> None:
+                payload = {"error": {"code": code, "message": message, "request_id": request_id}}
+                self.send_response(status)
+                for name, value in (headers or {}).items():
+                    self.send_header(name, value)
+                self._send_json_headers(payload)
 
             def log_message(self, format: str, *args: Any) -> None:
                 return

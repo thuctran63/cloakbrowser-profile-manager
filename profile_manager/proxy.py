@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from urllib.parse import urlsplit, urlunsplit
+import re
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 _ALLOWED_SCHEMES = {"http", "https", "socks5", "socks5h"}
 
@@ -48,4 +49,18 @@ def mask_proxy(value: str | None) -> str:
 def redact_proxy_in_text(text: str, proxy: str | None) -> str:
     if not proxy:
         return text
-    return text.replace(proxy, mask_proxy(proxy))
+    redacted = text.replace(proxy, mask_proxy(proxy))
+    try:
+        parsed = urlsplit(proxy)
+        secrets = [value for value in (parsed.username, parsed.password) if value]
+        for secret in secrets:
+            for variant in {secret, unquote(secret), quote(unquote(secret), safe="")}:
+                if variant:
+                    redacted = redacted.replace(variant, "***")
+    except (TypeError, ValueError):
+        pass
+    return re.sub(
+        r"(?i)(https?|socks5h?)://([^/@\s:]+):([^@/\s]+)@",
+        r"\1://***:***@",
+        redacted,
+    )

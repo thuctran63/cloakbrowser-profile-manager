@@ -14,11 +14,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from .models import AppSettings, ProfileConfig
+from .models import AppSettings, ProfileConfig, ProfileSettings
 from .proxy import normalize_proxy
 
 
 class ProfileStore:
+    _PROFILE_COLUMNS = (
+        "id, name, proxy, fingerprint_seed, data_dir, created_at, updated_at, "
+        "geoip, timezone, locale, release_channel, browser_version, humanize, human_preset"
+    )
     def __init__(self, app_data_dir: Path, default_profiles_dir: Path) -> None:
         self.app_data_dir = app_data_dir.resolve()
         self.default_profiles_dir = default_profiles_dir.resolve()
@@ -26,6 +30,7 @@ class ProfileStore:
         self.database_path = self.app_data_dir / "profiles.db"
         self.settings_path = self.app_data_dir / "settings.json"
         self._migration_lock = threading.RLock()
+        self._settings_lock = threading.RLock()
         self.app_data_dir.mkdir(parents=True, exist_ok=True)
         self._initialize_database()
 
@@ -54,52 +59,58 @@ class ProfileStore:
                 Path(temp_name).unlink(missing_ok=True)
 
     def load_settings(self) -> AppSettings:
-        data = self._read_json(self.settings_path, {})
-        return AppSettings.from_dict(data, self.default_profiles_dir)
+        with self._settings_lock:
+            data = self._read_json(self.settings_path, {})
+            settings = AppSettings.from_dict(data, self.default_profiles_dir)
+            if not settings.api_key:
+                settings.api_key = secrets.token_urlsafe(32)
+                self.save_settings(settings)
+            return settings
 
     def save_settings(self, settings: AppSettings) -> None:
-        target = Path(settings.default_profiles_dir).expanduser().resolve()
-        target.mkdir(parents=True, exist_ok=True)
-        probe = target / ".write-test"
-        try:
-            probe.write_text("ok", encoding="utf-8")
-        finally:
-            probe.unlink(missing_ok=True)
-        settings.default_profiles_dir = str(target)
-        if settings.api_host != "127.0.0.1":
-            raise ValueError("API hiện chỉ cho phép bind tại 127.0.0.1")
-        if not 1 <= settings.api_port <= 65535:
-            raise ValueError("API port phải nằm trong khoảng 1–65535")
-        if not 1 <= settings.max_concurrent_launches <= 20:
-            raise ValueError("Concurrent launches phải nằm trong khoảng 1–20")
-        self._atomic_write(self.settings_path, settings.to_dict())
+        with self._settings_lock:
+            target = Path(settings.default_profiles_dir).expanduser().resolve()
+            target.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=target, prefix=".write-test-", delete=True):
+                pass
+            settings.default_profiles_dir = str(target)
+            if settings.api_host != "127.0.0.1":
+                raise ValueError("API hiện chỉ cho phép bind tại 127.0.0.1")
+            if not 1 <= settings.api_port <= 65535:
+                raise ValueError("API port phải nằm trong khoảng 1–65535")
+            if not 1 <= settings.max_concurrent_launches <= 20:
+                raise ValueError("Concurrent launches phải nằm trong khoảng 1–20")
+            self._atomic_write(self.settings_path, settings.to_dict())
 
     def list_profiles(self) -> list[ProfileConfig]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT id, name, proxy, fingerprint_seed, data_dir, created_at, updated_at "
+                f"SELECT {self._PROFILE_COLUMNS} "
                 "FROM profiles ORDER BY name COLLATE NOCASE, id"
             ).fetchall()
-        return [ProfileConfig(**dict(row)) for row in rows]
+        return [self._profile_from_row(row) for row in rows]
 
     def _save_profiles(self, profiles: list[ProfileConfig]) -> None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("DELETE FROM profiles")
             connection.executemany(
-                "INSERT INTO profiles VALUES (?, ?, ?, ?, ?, ?, ?)",
-                [tuple(profile.to_dict().values()) for profile in profiles],
+                f"INSERT INTO profiles ({self._PROFILE_COLUMNS}) VALUES ({','.join('?' for _ in range(14))})",
+                [self._profile_values(profile) for profile in profiles],
             )
 
-    def create_profile(self, name: str, proxy: str = "") -> ProfileConfig:
+    def create_profile(
+        self, name: str, proxy: str = "", settings: ProfileSettings | None = None
+    ) -> ProfileConfig:
         clean_name = self._validate_name(name)
         normalized_proxy = normalize_proxy(proxy)
-        settings = self.load_settings()
+        app_settings = self.load_settings()
         profile_id = str(uuid.uuid4())
-        profile_dir = (Path(settings.default_profiles_dir) / profile_id).resolve()
+        profile_dir = (Path(app_settings.default_profiles_dir) / profile_id).resolve()
         profile_dir.mkdir(parents=True, exist_ok=False)
         (profile_dir / "user-data").mkdir()
         now = datetime.now(timezone.utc).isoformat()
+        identity = settings or ProfileSettings()
         profile = ProfileConfig(
             id=profile_id,
             name=clean_name,
@@ -108,13 +119,20 @@ class ProfileStore:
             data_dir=str(profile_dir),
             created_at=now,
             updated_at=now,
+            geoip=identity.geoip,
+            timezone=identity.timezone,
+            locale=identity.locale,
+            release_channel=identity.release_channel,
+            browser_version=identity.browser_version,
+            humanize=identity.humanize,
+            human_preset=identity.human_preset,
         )
         try:
             self._atomic_write(profile_dir / "profile.json", profile.to_dict())
             with self._connect() as connection:
                 connection.execute(
-                    "INSERT INTO profiles VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    tuple(profile.to_dict().values()),
+                    f"INSERT INTO profiles ({self._PROFILE_COLUMNS}) VALUES ({','.join('?' for _ in range(14))})",
+                    self._profile_values(profile),
                 )
                 connection.execute(
                     "INSERT INTO profile_extensions (profile_id, extension_id, assigned_at) "
@@ -126,18 +144,27 @@ class ProfileStore:
             raise
         return profile
 
-    def update_profile(self, profile_id: str, name: str, proxy: str = "") -> ProfileConfig:
+    def update_profile(
+        self, profile_id: str, name: str, proxy: str = "",
+        settings: ProfileSettings | None = None,
+    ) -> ProfileConfig:
         clean_name = self._validate_name(name)
         normalized_proxy = normalize_proxy(proxy)
         profile = self.get_profile(profile_id)
         profile.name = clean_name
         profile.proxy = normalized_proxy
+        if settings is not None:
+            for field in ("geoip", "timezone", "locale", "release_channel", "browser_version", "humanize", "human_preset"):
+                setattr(profile, field, getattr(settings, field))
         profile.updated_at = datetime.now(timezone.utc).isoformat()
         self._atomic_write(Path(profile.data_dir) / "profile.json", profile.to_dict())
         with self._connect() as connection:
             connection.execute(
-                "UPDATE profiles SET name = ?, proxy = ?, updated_at = ? WHERE id = ?",
-                (profile.name, profile.proxy, profile.updated_at, profile.id),
+                "UPDATE profiles SET name=?, proxy=?, updated_at=?, geoip=?, timezone=?, locale=?, "
+                "release_channel=?, browser_version=?, humanize=?, human_preset=? WHERE id=?",
+                (profile.name, profile.proxy, profile.updated_at, int(profile.geoip), profile.timezone,
+                 profile.locale, profile.release_channel, profile.browser_version, int(profile.humanize),
+                 profile.human_preset, profile.id),
             )
         return profile
 
@@ -164,12 +191,12 @@ class ProfileStore:
             raise KeyError("Profile ID không hợp lệ") from exc
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT id, name, proxy, fingerprint_seed, data_dir, created_at, updated_at "
+                f"SELECT {self._PROFILE_COLUMNS} "
                 "FROM profiles WHERE id = ?", (expected,)
             ).fetchone()
         if row is None:
             raise KeyError("Không tìm thấy profile")
-        return ProfileConfig(**dict(row))
+        return self._profile_from_row(row)
 
     def ping(self) -> bool:
         with self._connect() as connection:
@@ -197,6 +224,22 @@ class ProfileStore:
                 "fingerprint_seed INTEGER NOT NULL CHECK(fingerprint_seed BETWEEN 10000 AND 99999), "
                 "data_dir TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
             )
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if version > 3:
+                raise RuntimeError(f"Database version {version} chưa được hỗ trợ")
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(profiles)")}
+            migrations = {
+                "geoip": "INTEGER NOT NULL DEFAULT 1 CHECK(geoip IN (0,1))",
+                "timezone": "TEXT",
+                "locale": "TEXT",
+                "release_channel": "TEXT NOT NULL DEFAULT 'stable'",
+                "browser_version": "TEXT",
+                "humanize": "INTEGER NOT NULL DEFAULT 0 CHECK(humanize IN (0,1))",
+                "human_preset": "TEXT NOT NULL DEFAULT 'default'",
+            }
+            for name, definition in migrations.items():
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE profiles ADD COLUMN {name} {definition}")
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS extensions ("
                 "id TEXT PRIMARY KEY, name TEXT NOT NULL, version TEXT NOT NULL, "
@@ -222,13 +265,29 @@ class ProfileStore:
                     raise RuntimeError("Danh sách profile không hợp lệ")
                 profiles = [ProfileConfig.from_dict(item) for item in items]
                 connection.executemany(
-                    "INSERT INTO profiles VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    [tuple(profile.to_dict().values()) for profile in profiles],
+                    f"INSERT INTO profiles ({self._PROFILE_COLUMNS}) VALUES ({','.join('?' for _ in range(14))})",
+                    [self._profile_values(profile) for profile in profiles],
                 )
                 backup = self.index_path.with_suffix(".json.migrated")
                 if not backup.exists():
                     shutil.copy2(self.index_path, backup)
-            connection.execute("PRAGMA user_version=2")
+            connection.execute("PRAGMA user_version=3")
+
+    @staticmethod
+    def _profile_from_row(row: sqlite3.Row) -> ProfileConfig:
+        data = dict(row)
+        data["geoip"] = bool(data["geoip"])
+        data["humanize"] = bool(data["humanize"])
+        return ProfileConfig(**data)
+
+    @staticmethod
+    def _profile_values(profile: ProfileConfig) -> tuple[Any, ...]:
+        return (
+            profile.id, profile.name, profile.proxy, profile.fingerprint_seed,
+            profile.data_dir, profile.created_at, profile.updated_at, int(profile.geoip),
+            profile.timezone, profile.locale, profile.release_channel,
+            profile.browser_version, int(profile.humanize), profile.human_preset,
+        )
 
     @staticmethod
     def _find(profiles: list[ProfileConfig], profile_id: str) -> ProfileConfig:

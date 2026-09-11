@@ -257,7 +257,7 @@ class ProfileManagerApp:
         if not dialog.result:
             return
         try:
-            profile = self.store.create_profile(*dialog.result)
+            profile = self.store.create_profile(**dialog.result)
             self.refresh_profiles(profile.id)
             self.status_var.set(f"Đã tạo {profile.name}")
             self.toast.show(f"Đã tạo profile \"{profile.name}\"", kind="success")
@@ -268,12 +268,12 @@ class ProfileManagerApp:
         profile = self.selected_profile()
         if not profile or self._state(profile.id) != RuntimeState.STOPPED:
             return
-        dialog = ProfileDialog(self.root, "Sửa profile", profile.name, profile.proxy or "")
+        dialog = ProfileDialog(self.root, "Sửa profile", profile.name, profile.proxy or "", profile.settings)
         self.root.wait_window(dialog)
         if not dialog.result:
             return
         try:
-            updated = self.store.update_profile(profile.id, *dialog.result)
+            updated = self.store.update_profile(profile.id, **dialog.result)
             self.refresh_profiles(updated.id)
             self.status_var.set(f"Đã cập nhật {updated.name}")
             self.toast.show(f"Đã cập nhật profile \"{updated.name}\"", kind="success")
