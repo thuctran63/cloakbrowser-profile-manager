@@ -12,6 +12,7 @@ from typing import Any
 
 from cloakbrowser import launch_persistent_context_async
 
+from .extensions import ExtensionInfo, ExtensionLibrary, ImportResult
 from .models import OpenOptions, ProfileConfig, RuntimeState
 from .devtools import discover_cdp_url
 from .proxy import redact_proxy_in_text
@@ -24,6 +25,7 @@ class BrowserService:
         self,
         state_callback: StateCallback,
         max_concurrent_launches: int = 2,
+        extension_library: ExtensionLibrary | None = None,
     ) -> None:
         self._contexts: dict[str, Any] = {}
         self._cdp_urls: dict[str, str] = {}
@@ -33,6 +35,7 @@ class BrowserService:
         self._locks: dict[str, asyncio.Lock] = {}
         self._generation: dict[str, int] = {}
         self._launch_slots = asyncio.Semaphore(max_concurrent_launches)
+        self._extension_library = extension_library
         self._draining = False
 
     def state(self, profile_id: str) -> RuntimeState:
@@ -90,12 +93,17 @@ class BrowserService:
             if options.start_url is not None:
                 launch_args.append(f"--app={options.start_url}")
             async with self._launch_slots:
+                extension_paths = (
+                    [str(path) for path in self._extension_library.launch_paths(profile.id)]
+                    if self._extension_library else []
+                )
                 context = await launch_persistent_context_async(
                     profile.user_data_dir,
                     headless=False,
                     proxy=profile.proxy,
                     stealth_args=False,
                     args=launch_args,
+                    extension_paths=extension_paths or None,
                     chromium_sandbox=True,
                 )
             self._contexts[profile.id] = context
@@ -123,6 +131,66 @@ class BrowserService:
             message = redact_proxy_in_text(str(exc), profile.proxy)
             self._set_state(profile.id, RuntimeState.ERROR, message)
             raise RuntimeError(message) from exc
+
+    async def list_extensions(self) -> list[ExtensionInfo]:
+        return await asyncio.to_thread(self._require_library().list_extensions)
+
+    async def extension_assignments(self, extension_ids: list[str]) -> dict[str, set[str]]:
+        return await asyncio.to_thread(self._require_library().assignment_map, extension_ids)
+
+    async def import_extensions(
+        self, selected_folder: str
+    ) -> ImportResult:
+        return await asyncio.to_thread(
+            self._require_library().import_from_folder, selected_folder
+        )
+
+    async def assign_extensions(self, profile_ids: list[str], extension_ids: list[str]) -> None:
+        locks = await self._acquire_profile_locks(profile_ids)
+        try:
+            self._require_profiles_stopped(profile_ids)
+            await asyncio.to_thread(self._require_library().assign, profile_ids, extension_ids)
+        finally:
+            for lock in reversed(locks):
+                lock.release()
+
+    async def unassign_extensions(self, profile_ids: list[str], extension_ids: list[str]) -> None:
+        locks = await self._acquire_profile_locks(profile_ids)
+        try:
+            self._require_profiles_stopped(profile_ids)
+            await asyncio.to_thread(self._require_library().unassign, profile_ids, extension_ids)
+        finally:
+            for lock in reversed(locks):
+                lock.release()
+
+    async def set_default_extensions(self, extension_ids: list[str], enabled: bool) -> None:
+        await asyncio.to_thread(self._require_library().set_default_assignment, extension_ids, enabled)
+
+    async def delete_extensions(self, extension_ids: list[str]) -> list[ExtensionInfo]:
+        return await asyncio.to_thread(self._require_library().delete_extensions, extension_ids)
+
+    def _require_profiles_stopped(self, profile_ids: list[str]) -> None:
+        active = [profile_id for profile_id in profile_ids if self.state(profile_id) != RuntimeState.STOPPED]
+        if active:
+            raise RuntimeError("Hãy đóng tất cả profile được chọn trước khi thay đổi extension")
+
+    def _require_library(self) -> ExtensionLibrary:
+        if self._extension_library is None:
+            raise RuntimeError("Thư viện extension chưa được cấu hình")
+        return self._extension_library
+
+    async def _acquire_profile_locks(self, profile_ids: list[str]) -> list[asyncio.Lock]:
+        locks: list[asyncio.Lock] = []
+        try:
+            for profile_id in sorted(set(profile_ids)):
+                lock = self._lock(profile_id)
+                await lock.acquire()
+                locks.append(lock)
+            return locks
+        except BaseException:
+            for lock in reversed(locks):
+                lock.release()
+            raise
 
     async def _apply_open_options(self, context: Any, options: OpenOptions) -> None:
         if context.pages and (

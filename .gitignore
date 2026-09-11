@@ -9,3 +9,5 @@ build/
 dist/
 *.spec.bak
 .pytest_cache/
+# Temp files
+*.tmp

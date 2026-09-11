@@ -6,7 +6,7 @@ import math
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from profile_manager.browser_service import BrowserService
 from profile_manager.models import OpenOptions, ProfileConfig, RuntimeState
@@ -97,6 +97,7 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertRegex(kwargs["args"][4], r"^--remote-debugging-port=\d+$")
             self.assertEqual(kwargs["args"][5], "--remote-debugging-address=127.0.0.1")
+            self.assertIsNone(kwargs["extension_paths"])
             self.assertEqual(kwargs["proxy"], self.profile.proxy)
             self.assertFalse(kwargs["stealth_args"])
             self.assertTrue(kwargs["chromium_sandbox"])
@@ -115,6 +116,41 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(context.closed)
         self.assertIsNone(self.service.cdp_url(self.profile.id))
         self.assertEqual(self.service.state(self.profile.id), RuntimeState.STOPPED)
+
+    async def test_open_loads_managed_extensions(self) -> None:
+        context = FakeContext()
+        extension_library = MagicMock()
+        paths = [Path(self.temp.name) / "extensions" / "one"]
+        extension_library.launch_paths.return_value = paths
+        service = BrowserService(
+            lambda *event: self.events.append(event),
+            extension_library=extension_library,
+        )
+
+        async def launch(*_args, **kwargs):
+            self.assertEqual(kwargs["extension_paths"], [str(paths[0])])
+            return context
+
+        with patch("profile_manager.browser_service.launch_persistent_context_async", launch), patch(
+            "profile_manager.browser_service.discover_cdp_url",
+            return_value="http://127.0.0.1:9222",
+        ):
+            await service.open(self.profile)
+
+        extension_library.launch_paths.assert_called_once_with(self.profile.id)
+
+    async def test_extension_changes_require_stopped_profile(self) -> None:
+        extension_library = MagicMock()
+        service = BrowserService(lambda *_event: None, extension_library=extension_library)
+        service._states[self.profile.id] = RuntimeState.RUNNING
+
+        with self.assertRaisesRegex(RuntimeError, "đóng tất cả profile"):
+            await service.assign_extensions([self.profile.id], ["extension-id"])
+        with self.assertRaisesRegex(RuntimeError, "đóng tất cả profile"):
+            await service.unassign_extensions([self.profile.id], ["extension-id"])
+
+        extension_library.assign.assert_not_called()
+        extension_library.unassign.assert_not_called()
 
     async def test_manual_close_event_updates_state(self) -> None:
         context = FakeContext()

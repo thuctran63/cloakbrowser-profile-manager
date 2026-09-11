@@ -116,6 +116,11 @@ class ProfileStore:
                     "INSERT INTO profiles VALUES (?, ?, ?, ?, ?, ?, ?)",
                     tuple(profile.to_dict().values()),
                 )
+                connection.execute(
+                    "INSERT INTO profile_extensions (profile_id, extension_id, assigned_at) "
+                    "SELECT ?, id, ? FROM extensions WHERE assign_to_new_profiles = 1",
+                    (profile.id, now),
+                )
         except Exception:
             shutil.rmtree(profile_dir, ignore_errors=True)
             raise
@@ -192,6 +197,24 @@ class ProfileStore:
                 "fingerprint_seed INTEGER NOT NULL CHECK(fingerprint_seed BETWEEN 10000 AND 99999), "
                 "data_dir TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
             )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS extensions ("
+                "id TEXT PRIMARY KEY, name TEXT NOT NULL, version TEXT NOT NULL, "
+                "description TEXT NOT NULL DEFAULT '', manifest_version INTEGER NOT NULL, "
+                "directory TEXT NOT NULL UNIQUE, imported_at TEXT NOT NULL, "
+                "source_name TEXT NOT NULL DEFAULT '', size_bytes INTEGER NOT NULL DEFAULT 0, "
+                "assign_to_new_profiles INTEGER NOT NULL DEFAULT 0)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS profile_extensions ("
+                "profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE, "
+                "extension_id TEXT NOT NULL REFERENCES extensions(id) ON DELETE RESTRICT, "
+                "assigned_at TEXT NOT NULL, PRIMARY KEY(profile_id, extension_id))"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS profile_extensions_extension_idx "
+                "ON profile_extensions(extension_id)"
+            )
             count = connection.execute("SELECT COUNT(*) FROM profiles").fetchone()[0]
             if count == 0 and self.index_path.exists():
                 items = self._read_json(self.index_path, [])
@@ -205,7 +228,7 @@ class ProfileStore:
                 backup = self.index_path.with_suffix(".json.migrated")
                 if not backup.exists():
                     shutil.copy2(self.index_path, backup)
-            connection.execute("PRAGMA user_version=1")
+            connection.execute("PRAGMA user_version=2")
 
     @staticmethod
     def _find(profiles: list[ProfileConfig], profile_id: str) -> ProfileConfig:
