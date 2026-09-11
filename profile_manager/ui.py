@@ -104,3 +104,82 @@ class BaseDialog(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.bind("<Escape>", lambda _event: self.destroy())
         self.after_idle(lambda: center_window(self))
+
+
+class ToastManager:
+    """Global toast notification overlay that stacks messages at the bottom-right of a parent."""
+
+    _ICONS = {"success": "✓", "error": "✕", "warning": "⚠", "info": "ℹ"}
+
+    def __init__(self, parent: tk.Misc, *, duration: int = 3500) -> None:
+        self.parent = parent
+        self.duration = duration
+        self._toasts: list[tk.Frame] = []
+
+    def show(self, message: str, kind: str = "info", *, duration: int | None = None) -> None:
+        """Display a toast notification. *kind* is one of success, error, warning, info."""
+        if duration is None:
+            duration = self.duration
+
+        # Ensure parent is mapped before placing
+        self.parent.update_idletasks()
+
+        container = tk.Frame(self.parent, bg=Theme.SURFACE, bd=0, highlightthickness=1,
+                             highlightbackground=Theme.BORDER, relief="flat")
+        colors = {
+            "success": (Theme.SUCCESS, Theme.SUCCESS_BG),
+            "error": (Theme.DANGER, Theme.DANGER_BG),
+            "warning": (Theme.WARNING, Theme.WARNING_BG),
+            "info": (Theme.INFO, Theme.INFO_BG),
+        }
+        fg, bg = colors.get(kind, colors["info"])
+        container.configure(bg=bg, highlightbackground=fg)
+
+        icon_label = tk.Label(container, text=self._ICONS.get(kind, "ℹ"), font=(Theme.FONT, 14, "bold"),
+                              bg=bg, fg=fg, padx=10, pady=6)
+        icon_label.pack(side="left")
+
+        msg_label = tk.Label(container, text=message, font=(Theme.FONT, 10), bg=bg, fg=Theme.TEXT,
+                             anchor="w", padx=12, pady=6, wraplength=380, justify="left")
+        msg_label.pack(side="left", fill="x", expand=True)
+
+        close_btn = tk.Label(container, text="✕", font=(Theme.FONT, 9), bg=bg, fg=Theme.MUTED,
+                             padx=8, pady=6, cursor="hand2")
+        close_btn.pack(side="right")
+        close_btn.bind("<Button-1>", lambda _e, c=container: self._dismiss(c))
+
+        # Position at bottom-right, stacked above previous toasts
+        self.parent.update_idletasks()
+        parent_w = self.parent.winfo_width()
+        x_offset = parent_w - 400 - 20  # 400 = approximate toast width + padding
+        y_offset = self.parent.winfo_height() - 60
+        for existing in self._toasts:
+            y_offset -= existing.winfo_reqheight() + 6
+        if y_offset < 10:
+            y_offset = 10
+
+        container.place(x=max(x_offset, 20), y=y_offset, width=400)
+        self._toasts.append(container)
+
+        # Auto-dismiss
+        container.after(duration, lambda c=container: self._dismiss(c))
+
+    def _dismiss(self, container: tk.Frame) -> None:
+        if container not in self._toasts:
+            return
+        self._toasts.remove(container)
+        container.place_forget()
+        container.destroy()
+        self._reposition()
+
+    def _reposition(self) -> None:
+        """Re-stack remaining toasts from the bottom."""
+        self.parent.update_idletasks()
+        y_offset = self.parent.winfo_height() - 60
+        parent_w = self.parent.winfo_width()
+        x_offset = parent_w - 400 - 20
+        for toast in reversed(self._toasts):
+            y_offset -= toast.winfo_reqheight() + 6
+            if y_offset < 10:
+                y_offset = 10
+            toast.place(x=max(x_offset, 20), y=y_offset, width=400)

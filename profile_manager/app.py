@@ -14,7 +14,7 @@ from .extensions import ExtensionLibrary
 from .models import AppSettings, ProfileConfig, RuntimeState
 from .profile_store import ProfileStore
 from .proxy import mask_proxy
-from .ui import Theme
+from .ui import Theme, ToastManager
 from .views.extension_manager_page import ExtensionManagerPage
 from .views.profile_dialog import ProfileDialog
 from .views.settings_page import SettingsPage
@@ -55,6 +55,7 @@ class ProfileManagerApp:
         self.current_page = "profiles"
         self.status_var = tk.StringVar(value="Sẵn sàng")
         self.search_var = tk.StringVar()
+        self.toast = ToastManager(self.root)
         self._configure_window()
         self._build_ui()
         self.refresh_profiles()
@@ -155,7 +156,7 @@ class ProfileManagerApp:
         ttk.Label(footer, textvariable=self.status_var, style="Status.TLabel").pack(side="left")
         ttk.Label(footer, text="Fingerprint cố định theo từng profile", style="Status.TLabel").pack(side="right")
         self.extension_page = ExtensionManagerPage(
-            self.content_host, [], {}, self.service, self.worker, self.status_var.set
+            self.content_host, [], {}, self.service, self.worker, self.status_var.set, on_toast=self._show_toast
         )
         self.settings_page = SettingsPage(self.content_host, self.store.load_settings, self._save_settings)
         self.pages = {"profiles": self.profiles_page, "extensions": self.extension_page, "settings": self.settings_page}
@@ -259,6 +260,7 @@ class ProfileManagerApp:
             profile = self.store.create_profile(*dialog.result)
             self.refresh_profiles(profile.id)
             self.status_var.set(f"Đã tạo {profile.name}")
+            self.toast.show(f"Đã tạo profile \"{profile.name}\"", kind="success")
         except Exception as exc:
             messagebox.showerror("Không thể tạo profile", str(exc), parent=self.root)
 
@@ -274,6 +276,7 @@ class ProfileManagerApp:
             updated = self.store.update_profile(profile.id, *dialog.result)
             self.refresh_profiles(updated.id)
             self.status_var.set(f"Đã cập nhật {updated.name}")
+            self.toast.show(f"Đã cập nhật profile \"{updated.name}\"", kind="success")
         except Exception as exc:
             messagebox.showerror("Không thể cập nhật profile", str(exc), parent=self.root)
 
@@ -294,6 +297,7 @@ class ProfileManagerApp:
             self.states.pop(profile.id, None)
             self.refresh_profiles()
             self.status_var.set(f"Đã xóa {profile.name}")
+            self.toast.show(f"Đã xóa profile \"{profile.name}\"", kind="success")
         except Exception as exc:
             messagebox.showerror("Không thể xóa profile", str(exc), parent=self.root)
 
@@ -318,6 +322,10 @@ class ProfileManagerApp:
     def open_settings(self) -> None:
         """Compatibility route for callers that previously opened the sidebar dialog."""
         self.show_page("settings")
+
+    def _show_toast(self, message: str, kind: str = "info") -> None:
+        """Display a global toast notification."""
+        self.toast.show(message, kind=kind)
 
     def _save_settings(self, settings: AppSettings) -> str:
         previous = self.store.load_settings()
@@ -344,6 +352,7 @@ class ProfileManagerApp:
             raise
         message = f"Đã lưu settings · API: {self.api_server.address}"
         self.status_var.set(message)
+        self.toast.show("Đã lưu settings thành công", kind="success")
         return message
 
     async def _apply_runtime_settings(self, settings: AppSettings) -> None:
@@ -356,6 +365,7 @@ class ProfileManagerApp:
             except Exception as exc:
                 if not self.shutting_down:
                     messagebox.showerror(error_title, str(exc), parent=self.root)
+                    self.toast.show(str(exc), kind="error")
             self._update_actions()
         future.add_done_callback(lambda done: self.root.after(0, complete, done))
 

@@ -21,13 +21,15 @@ class ExtensionManagerPage(ttk.Frame):
     def __init__(self, parent: tk.Misc, profiles: list[ProfileConfig], states: dict[str, RuntimeState],
                  service: BrowserService, worker: AsyncWorker,
                  on_status: Callable[[str], None] | None = None, selected_profile_id: str | None = None,
-                 on_close: Callable[[], None] | None = None) -> None:
+                 on_close: Callable[[], None] | None = None,
+                 on_toast: Callable[[str, str], None] | None = None) -> None:
         super().__init__(parent, style="App.TFrame")
         self.profiles = profiles
         self.states = states
         self.service = service
         self.worker = worker
         self.on_status = on_status
+        self.on_toast = on_toast
         self.selected_profile_id = selected_profile_id
         self.on_close = on_close
         self.extensions: dict[str, ExtensionInfo] = {}
@@ -68,7 +70,7 @@ class ExtensionManagerPage(ttk.Frame):
 
         columns = ("name", "version", "uses", "default")
         self.tree = ttk.Treeview(library, columns=columns, show="headings", selectmode="extended")
-        for column, heading in (("name", "Tên extension"), ("version", "Phiên bản"), ("uses", "Profiles"), ("default", "Profile mới")):
+        for column, heading in (("name", "Tên extension"), ("version", "Phiên bản"), ("uses", "Profiles"), ("default", "Tự động import profile mới")):
             self.tree.heading(column, text=heading)
         self.tree.column("name", width=260, minwidth=160)
         self.tree.column("version", width=85, minwidth=70, anchor="center")
@@ -83,18 +85,36 @@ class ExtensionManagerPage(ttk.Frame):
         ttk.Label(assignments, text="Khi chọn nhiều extension, danh sách đánh dấu chỉ hiển thị giao của các profile: profile đã được gán cho toàn bộ extension đang chọn.", style="SurfaceSubtitle.TLabel", wraplength=360).pack(fill="x", pady=(0, 10))
         profile_frame = ttk.Frame(assignments)
         profile_frame.pack(fill="both", expand=True)
-        self.profile_list = tk.Listbox(profile_frame, selectmode="extended", exportselection=False, activestyle="dotbox", font=(Theme.FONT, 10), relief="solid", borderwidth=1, background=Theme.SURFACE, foreground=Theme.TEXT, selectbackground=Theme.INDIGO_SOFT, selectforeground=Theme.TEXT, highlightcolor=Theme.INDIGO, highlightbackground=Theme.BORDER)
-        profile_scroll = ttk.Scrollbar(profile_frame, orient="vertical", command=self.profile_list.yview)
-        self.profile_list.configure(yscrollcommand=profile_scroll.set)
-        self.profile_list.pack(side="left", fill="both", expand=True)
+
+        # Sortable Treeview table replacing the old Listbox
+        profile_columns = ("stt", "pid", "name", "status")
+        self.profile_tree = ttk.Treeview(profile_frame, columns=profile_columns, show="headings", selectmode="extended")
+        self.profile_tree.heading("stt", text="STT", anchor="center")
+        self.profile_tree.heading("pid", text="ID", anchor="w")
+        self.profile_tree.heading("name", text="Profile Name", anchor="w")
+        self.profile_tree.heading("status", text="Trạng thái gán", anchor="center")
+        self.profile_tree.column("stt", width=50, minwidth=40, anchor="center")
+        self.profile_tree.column("pid", width=140, minwidth=100, anchor="w")
+        self.profile_tree.column("name", width=150, minwidth=100, anchor="w")
+        self.profile_tree.column("status", width=110, minwidth=90, anchor="center")
+        profile_scroll = ttk.Scrollbar(profile_frame, orient="vertical", command=self.profile_tree.yview)
+        self.profile_tree.configure(yscrollcommand=profile_scroll.set)
+        self.profile_tree.pack(side="left", fill="both", expand=True)
         profile_scroll.pack(side="right", fill="y")
+
+        # Enable column-sort on double-click
+        self._profile_sort_col: str | None = None
+        self._profile_sort_reverse: bool = False
+        for col in profile_columns:
+            self.profile_tree.heading(col, command=lambda c=col: self._sort_profile_tree(c))
+        self.profile_tree.tag_configure("assigned", foreground=Theme.SUCCESS)
         self.profile_ids: list[str] = []
         for index, profile in enumerate(self.profiles):
-            state = self.states.get(profile.id, RuntimeState.STOPPED)
             self.profile_ids.append(profile.id)
-            self.profile_list.insert("end", f"{profile.name}  ·  {self._localized_state(state)}")
+            self.profile_tree.insert("", "end", iid=profile.id, values=(index + 1, profile.id[:8], profile.name, "Chưa gán"),
+                                     tags=())
             if profile.id == self.selected_profile_id:
-                self.profile_list.selection_set(index)
+                self.profile_tree.selection_add(profile.id)
         actions = ttk.Frame(assignments)
         actions.pack(fill="x", pady=(10, 0))
         self.assign_button = ttk.Button(actions, text="Gán đã chọn", style="Primary.TButton", command=self._assign)
@@ -114,7 +134,7 @@ class ExtensionManagerPage(ttk.Frame):
         ttk.Label(footer, textvariable=self.status_var, style="Subtitle.TLabel").pack(side="left", fill="x", expand=True)
         if self.on_close:
             ttk.Button(footer, text="Đóng", command=self._close).pack(side="right")
-        self.profile_list.bind("<<ListboxSelect>>", lambda _event: self._update_actions())
+        self.profile_tree.bind("<<TreeviewSelect>>", lambda _event: self._update_actions())
         self._update_actions()
 
     def refresh(self) -> None:
@@ -132,14 +152,9 @@ class ExtensionManagerPage(ttk.Frame):
         if states is not None:
             self.states = states
         self.selected_profile_id = selected_profile_id
+        # Clear profile list — only populated when an extension is selected
         self.profile_ids.clear()
-        self.profile_list.delete(0, "end")
-        for index, profile in enumerate(self.profiles):
-            state = self.states.get(profile.id, RuntimeState.STOPPED)
-            self.profile_ids.append(profile.id)
-            self.profile_list.insert("end", f"{profile.name}  ·  {self._localized_state(state)}")
-            if profile.id == selected_profile_id:
-                self.profile_list.selection_set(index)
+        self.profile_tree.delete(*self.profile_tree.get_children())
         self.refresh()
 
     def _extensions_loaded(self, extensions: list[ExtensionInfo]) -> None:
@@ -161,8 +176,11 @@ class ExtensionManagerPage(ttk.Frame):
             return
         ids = list(self.tree.selection())
         if not ids:
+            # No extension selected — clear profile list
             self.assignments = {}
             self.default_var.set(False)
+            self.profile_ids.clear()
+            self.profile_tree.delete(*self.profile_tree.get_children())
             self._update_actions()
             return
         defaults = {self.extensions[item_id].assign_to_new_profiles for item_id in ids}
@@ -173,19 +191,54 @@ class ExtensionManagerPage(ttk.Frame):
     def _assignments_loaded(self, assignments: dict[str, set[str]]) -> None:
         self.assignments = assignments
         selected_extensions = list(self.tree.selection())
-        self.profile_list.selection_clear(0, "end")
+
+        # Rebuild profile list from scratch based on current assignments
+        self.profile_ids.clear()
+        self.profile_tree.delete(*self.profile_tree.get_children())
+
         if selected_extensions:
             common = set.intersection(*(assignments.get(item_id, set()) for item_id in selected_extensions))
-            for index, profile_id in enumerate(self.profile_ids):
-                if profile_id in common:
-                    self.profile_list.selection_set(index)
+        else:
+            common = set()
+
+        for index, profile in enumerate(self.profiles):
+            self.profile_ids.append(profile.id)
+            assigned = profile.id in common
+            status_text = "Đã gán" if assigned else "Chưa gán"
+            tags = ("assigned",) if assigned else ()
+            self.profile_tree.insert("", "end", iid=profile.id,
+                                     values=(index + 1, profile.id[:8], profile.name, status_text),
+                                     tags=tags)
+            if assigned:
+                self.profile_tree.selection_add(profile.id)
+
         self.status_var.set("Các profile đang chọn đã được gán cho toàn bộ extension được chọn.")
+        self._update_actions()
 
     def _selected_profiles(self) -> list[str]:
-        return [self.profile_ids[index] for index in self.profile_list.curselection()]
+        return list(self.profile_tree.selection())
+
+    def _sort_profile_tree(self, col: str) -> None:
+        """Sort the profile Treeview by the given column on double-click."""
+        if self._profile_sort_col == col:
+            self._profile_sort_reverse = not self._profile_sort_reverse
+        else:
+            self._profile_sort_col = col
+            self._profile_sort_reverse = False
+
+        children = [(self.profile_tree.set(child, col), child) for child in self.profile_tree.get_children("")]
+        # For STT column, sort numerically
+        if col == "stt":
+            children.sort(key=lambda t: int(t[0]) if t[0].isdigit() else 0, reverse=self._profile_sort_reverse)
+        else:
+            children.sort(key=lambda t: t[0], reverse=self._profile_sort_reverse)
+
+        for idx, (_, child) in enumerate(children):
+            self.profile_tree.move(child, "", idx)
+            self.profile_tree.set(child, "stt", idx + 1)
 
     def _select_all_profiles(self) -> None:
-        self.profile_list.selection_set(0, "end")
+        self.profile_tree.selection_set(self.profile_tree.get_children())
         self._update_actions()
 
     def _assign(self) -> None:
@@ -250,6 +303,9 @@ class ExtensionManagerPage(ttk.Frame):
     def _mutation_complete(self, status: str) -> None:
         if self.on_status:
             self.on_status(status)
+        if self.on_toast:
+            kind = "success" if "lỗi" not in status.lower() else "error"
+            self.on_toast(status, kind)
         self._set_busy(False, status)
         self.refresh()
 
@@ -261,6 +317,8 @@ class ExtensionManagerPage(ttk.Frame):
                 result = done.result()
             except Exception as exc:
                 self._set_busy(False, str(exc))
+                if self.on_toast:
+                    self.on_toast(str(exc), "error")
                 messagebox.showerror(error_title, str(exc), parent=self.winfo_toplevel())
             else:
                 on_success(result)
@@ -287,7 +345,7 @@ class ExtensionManagerPage(ttk.Frame):
 
     def _update_actions(self) -> None:
         extensions_selected = bool(self.tree.selection())
-        profiles_selected = bool(self.profile_list.curselection())
+        profiles_selected = bool(self.profile_tree.selection())
         normal = not self.busy and not self.disabled
         self.import_button.configure(state="normal" if normal else "disabled")
         self.refresh_button.configure(state="normal" if normal else "disabled")
