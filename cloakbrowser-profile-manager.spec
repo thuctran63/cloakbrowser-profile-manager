@@ -38,7 +38,8 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,
+    console=False,
+    windowed=True,
     icon="assets/cloakbrowser.ico",
     disable_windowed_traceback=False,
 )

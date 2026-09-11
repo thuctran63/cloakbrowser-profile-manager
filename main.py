@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import tkinter as tk
 import ctypes
+import io
 import os
 import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+# In windowed builds (console=False), stdout/stderr may be None.
+# Redirect to a null sink so accidental prints never crash.
+if sys.stdout is None:
+    sys.stdout = io.StringIO()
+if sys.stderr is None:
+    sys.stderr = io.StringIO()
 
 PROJECT_ROOT = (
     Path(sys.executable).resolve().parent
