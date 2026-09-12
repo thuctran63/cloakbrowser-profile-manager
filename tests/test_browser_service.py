@@ -23,6 +23,9 @@ class FakeContext:
 
     async def close(self) -> None:
         self.closed = True
+        handler = self.handlers.get("close")
+        if handler:
+            handler(self)
 
     async def new_cdp_session(self, page):
         return FakeCdpSession()
@@ -63,6 +66,22 @@ class FakePage:
         return False
 
 
+class FakePlaywright:
+    def __init__(self) -> None:
+        self.stop_calls = 0
+
+    async def stop(self) -> None:
+        self.stop_calls += 1
+
+
+class FakePlaywrightManager:
+    def __init__(self, playwright) -> None:
+        self.playwright = playwright
+
+    async def start(self):
+        return self.playwright
+
+
 class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -76,9 +95,17 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
             updated_at="now",
         )
         self.events = []
+        self.playwright = FakePlaywright()
+        self.playwright_patch = patch(
+            "profile_manager.browser_service.async_playwright",
+            return_value=FakePlaywrightManager(self.playwright),
+        )
+        self.playwright_patch.start()
         self.service = BrowserService(lambda *event: self.events.append(event))
 
     async def asyncTearDown(self) -> None:
+        await self.service.close_all()
+        self.playwright_patch.stop()
         self.temp.cleanup()
 
     async def test_open_passes_stable_seed_and_close_cleans_up(self) -> None:
@@ -170,6 +197,58 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
 
         self.assertEqual(self.service.state(self.profile.id), RuntimeState.STOPPED)
+        self.assertEqual(self.playwright.stop_calls, 0)
+
+    async def test_profiles_share_one_playwright_until_shutdown(self) -> None:
+        second_profile = ProfileConfig(
+            id="00000000-0000-0000-0000-000000000002",
+            name="Second",
+            proxy=None,
+            fingerprint_seed=54322,
+            data_dir=str(Path(self.temp.name) / "second"),
+            created_at="now",
+            updated_at="now",
+        )
+        contexts = [FakeContext(), FakeContext()]
+        playwrights = []
+
+        async def launch(*_args, **kwargs):
+            playwrights.append(kwargs["playwright"])
+            return contexts[len(playwrights) - 1]
+
+        with patch("profile_manager.browser_service.launch_persistent_context_async", launch), patch(
+            "profile_manager.browser_service.discover_cdp_url",
+            side_effect=["http://127.0.0.1:9222", "http://127.0.0.1:9223"],
+        ):
+            await asyncio.gather(
+                self.service.open(self.profile), self.service.open(second_profile)
+            )
+            await self.service.close_all()
+
+        self.assertIs(playwrights[0], playwrights[1])
+        self.assertTrue(all(context.closed for context in contexts))
+        self.assertEqual(self.playwright.stop_calls, 1)
+
+    async def test_stale_close_event_cannot_stop_reopened_profile(self) -> None:
+        old_context, new_context = FakeContext(), FakeContext()
+        contexts = iter([old_context, new_context])
+
+        async def launch(*_args, **_kwargs):
+            return next(contexts)
+
+        with patch("profile_manager.browser_service.launch_persistent_context_async", launch), patch(
+            "profile_manager.browser_service.discover_cdp_url",
+            side_effect=["http://127.0.0.1:9222", "http://127.0.0.1:9223"],
+        ):
+            await self.service.open(self.profile)
+            old_handler = old_context.handlers["close"]
+            await self.service.close(self.profile.id)
+            await self.service.open(self.profile)
+            old_handler(old_context)
+            await asyncio.sleep(0)
+
+        self.assertEqual(self.service.state(self.profile.id), RuntimeState.RUNNING)
+        self.assertIs(self.service._contexts[self.profile.id], new_context)
 
     async def test_open_is_idempotent(self) -> None:
         context = FakeContext()

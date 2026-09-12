@@ -32,8 +32,7 @@ di chuyển riêng EXE ra khỏi thư mục portable nếu muốn giữ nguyên 
 
 ## Cài đặt development
 
-Dependency CloakBrowser được pin vào commit bất biến của custom fork trong
-`requirements.txt`:
+Dependency CloakBrowser được pin vào commit bất biến trong `requirements.txt`:
 
 ```powershell
 & "C:/Program Files/Python311/python.exe" -m pip install -r requirements.txt

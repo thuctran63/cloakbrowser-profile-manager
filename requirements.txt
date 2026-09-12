@@ -1,4 +1,4 @@
-cloakbrowser @ git+https://github.com/thuctran63/CloakBrowser.git@4013c0f33858329fd17bdac48ef9326f2b2d43be
+cloakbrowser @ git+https://github.com/thuctran63/CloakBrowser.git@fb6844a045a14f6ff2ab772897d0162fcbd31b48
 python-dotenv==1.2.2
 geoip2>=4.0
 socksio>=1.0

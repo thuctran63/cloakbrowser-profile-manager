@@ -12,6 +12,7 @@ from typing import Any
 
 from cloakbrowser import __version__ as cloakbrowser_version
 from cloakbrowser import binary_info, launch_persistent_context_async, maybe_resolve_geoip
+from playwright.async_api import async_playwright
 
 from .extensions import ExtensionInfo, ExtensionLibrary, ImportResult
 from .models import OpenOptions, ProfileConfig, RuntimeState
@@ -38,6 +39,8 @@ class BrowserService:
         self._launch_slots = asyncio.Semaphore(max_concurrent_launches)
         self._extension_library = extension_library
         self._draining = False
+        self._playwright: Any | None = None
+        self._playwright_lock = asyncio.Lock()
 
     def state(self, profile_id: str) -> RuntimeState:
         return self._states.get(profile_id, RuntimeState.STOPPED)
@@ -151,16 +154,17 @@ class BrowserService:
                     humanize=profile.humanize,
                     human_preset=profile.human_preset,
                     chromium_sandbox=True,
+                    playwright=await self._get_playwright(),
                 )
             self._contexts[profile.id] = context
-            cdp_url = await discover_cdp_url(profile.user_data_dir, started_at)
-            self._cdp_urls[profile.id] = cdp_url
             context.on(
                 "close",
                 lambda *_args: asyncio.get_running_loop().create_task(
-                    self._handle_context_closed(profile.id, generation)
+                    self._handle_context_closed(profile.id, generation, context)
                 ),
             )
+            cdp_url = await discover_cdp_url(profile.user_data_dir, started_at)
+            self._cdp_urls[profile.id] = cdp_url
             if not context.pages:
                 await context.new_page()
             await self._apply_open_options(context, options)
@@ -315,22 +319,41 @@ class BrowserService:
             self._closing.discard(profile_id)
             self._set_state(profile_id, RuntimeState.STOPPED)
 
-    async def _handle_context_closed(self, profile_id: str, generation: int) -> None:
-        if self._generation.get(profile_id) != generation:
-            return
-        self._contexts.pop(profile_id, None)
-        self._cdp_urls.pop(profile_id, None)
-        self._closing.discard(profile_id)
-        self._set_state(profile_id, RuntimeState.STOPPED)
+    async def _handle_context_closed(
+        self, profile_id: str, generation: int, context: Any
+    ) -> None:
+        async with self._lock(profile_id):
+            if (
+                self._generation.get(profile_id) != generation
+                or self._contexts.get(profile_id) is not context
+            ):
+                return
+            self._contexts.pop(profile_id, None)
+            self._cdp_urls.pop(profile_id, None)
+            self._closing.discard(profile_id)
+            self._set_state(profile_id, RuntimeState.STOPPED)
 
     async def close_all(self) -> None:
         self._draining = True
-        profile_ids = list(self._contexts)
+        profile_ids = list(set(self._states) | set(self._contexts))
         if profile_ids:
             await asyncio.gather(
                 *(self.close(profile_id) for profile_id in profile_ids),
                 return_exceptions=True,
             )
+        await self._stop_playwright()
+
+    async def _get_playwright(self) -> Any:
+        async with self._playwright_lock:
+            if self._playwright is None:
+                self._playwright = await async_playwright().start()
+            return self._playwright
+
+    async def _stop_playwright(self) -> None:
+        async with self._playwright_lock:
+            playwright, self._playwright = self._playwright, None
+            if playwright is not None:
+                await playwright.stop()
 
     def begin_draining(self) -> None:
         self._draining = True
