@@ -37,8 +37,8 @@ class ProfileManagerApp:
         )
         self.service = BrowserService(
             self._on_worker_state,
-            api_settings.max_concurrent_launches,
-            self.extension_library,
+            extension_library=self.extension_library,
+            playwright_instances=api_settings.playwright_instances,
         )
         self.api_server = ProfileApiServer(
             self.store,
@@ -356,7 +356,7 @@ class ProfileManagerApp:
         return message
 
     async def _apply_runtime_settings(self, settings: AppSettings) -> None:
-        self.service.configure_limits(settings.max_concurrent_launches)
+        await self.service.configure_runtime(settings.playwright_instances)
 
     def _observe(self, future: Future[Any], error_title: str, profile: ProfileConfig) -> None:
         def complete(done: Future[Any]) -> None:

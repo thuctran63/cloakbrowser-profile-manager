@@ -26,9 +26,11 @@ class BrowserService:
     def __init__(
         self,
         state_callback: StateCallback,
-        max_concurrent_launches: int = 2,
         extension_library: ExtensionLibrary | None = None,
+        playwright_instances: int = 1,
     ) -> None:
+        if not 1 <= playwright_instances <= 20:
+            raise ValueError("Playwright instances phải nằm trong khoảng 1–20")
         self._contexts: dict[str, Any] = {}
         self._cdp_urls: dict[str, str] = {}
         self._states: dict[str, RuntimeState] = {}
@@ -36,11 +38,12 @@ class BrowserService:
         self._closing: set[str] = set()
         self._locks: dict[str, asyncio.Lock] = {}
         self._generation: dict[str, int] = {}
-        self._launch_slots = asyncio.Semaphore(max_concurrent_launches)
+        self._launch_slots = asyncio.Semaphore(1)
         self._extension_library = extension_library
         self._draining = False
-        self._playwright: Any | None = None
-        self._playwright_lock = asyncio.Lock()
+        self._playwrights: list[Any | None] = [None] * playwright_instances
+        self._playwright_locks = [asyncio.Lock() for _ in range(playwright_instances)]
+        self._profile_slots: dict[str, int] = {}
 
     def state(self, profile_id: str) -> RuntimeState:
         return self._states.get(profile_id, RuntimeState.STOPPED)
@@ -154,7 +157,7 @@ class BrowserService:
                     humanize=profile.humanize,
                     human_preset=profile.human_preset,
                     chromium_sandbox=True,
-                    playwright=await self._get_playwright(),
+                    playwright=await self._get_playwright(profile.id),
                 )
             self._contexts[profile.id] = context
             context.on(
@@ -173,6 +176,7 @@ class BrowserService:
         except Exception as exc:
             self._contexts.pop(profile.id, None)
             self._cdp_urls.pop(profile.id, None)
+            self._profile_slots.pop(profile.id, None)
             if context is not None:
                 try:
                     await context.close()
@@ -304,6 +308,7 @@ class BrowserService:
         state = self.state(profile_id)
         context = self._contexts.get(profile_id)
         if context is None:
+            self._profile_slots.pop(profile_id, None)
             self._set_state(profile_id, RuntimeState.STOPPED)
             return
         if profile_id in self._closing or state == RuntimeState.STOPPING:
@@ -316,6 +321,7 @@ class BrowserService:
         finally:
             self._contexts.pop(profile_id, None)
             self._cdp_urls.pop(profile_id, None)
+            self._profile_slots.pop(profile_id, None)
             self._closing.discard(profile_id)
             self._set_state(profile_id, RuntimeState.STOPPED)
 
@@ -330,6 +336,7 @@ class BrowserService:
                 return
             self._contexts.pop(profile_id, None)
             self._cdp_urls.pop(profile_id, None)
+            self._profile_slots.pop(profile_id, None)
             self._closing.discard(profile_id)
             self._set_state(profile_id, RuntimeState.STOPPED)
 
@@ -341,27 +348,47 @@ class BrowserService:
                 *(self.close(profile_id) for profile_id in profile_ids),
                 return_exceptions=True,
             )
-        await self._stop_playwright()
+        self._profile_slots.clear()
+        await self._stop_playwrights()
 
-    async def _get_playwright(self) -> Any:
-        async with self._playwright_lock:
-            if self._playwright is None:
-                self._playwright = await async_playwright().start()
-            return self._playwright
+    async def _get_playwright(self, profile_id: str) -> Any:
+        slot = self._profile_slots.get(profile_id)
+        if slot is None:
+            loads = [0] * len(self._playwrights)
+            for assigned_slot in self._profile_slots.values():
+                loads[assigned_slot] += 1
+            slot = min(range(len(loads)), key=loads.__getitem__)
+            self._profile_slots[profile_id] = slot
+        async with self._playwright_locks[slot]:
+            if self._playwrights[slot] is None:
+                self._playwrights[slot] = await async_playwright().start()
+            return self._playwrights[slot]
 
-    async def _stop_playwright(self) -> None:
-        async with self._playwright_lock:
-            playwright, self._playwright = self._playwright, None
-            if playwright is not None:
-                await playwright.stop()
+    async def _stop_playwrights(self) -> None:
+        for slot, lock in enumerate(self._playwright_locks):
+            async with lock:
+                playwright, self._playwrights[slot] = self._playwrights[slot], None
+                if playwright is not None:
+                    await playwright.stop()
 
     def begin_draining(self) -> None:
         self._draining = True
 
-    def configure_limits(self, max_concurrent_launches: int) -> None:
-        if any(state == RuntimeState.STARTING for state in self._states.values()):
-            raise RuntimeError("Không thể đổi giới hạn khi profile đang khởi động")
-        self._launch_slots = asyncio.Semaphore(max_concurrent_launches)
+    async def configure_runtime(self, playwright_instances: int) -> None:
+        if not 1 <= playwright_instances <= 20:
+            raise ValueError("Playwright instances phải nằm trong khoảng 1–20")
+        if playwright_instances != len(self._playwrights):
+            if self._contexts or any(
+                state in {RuntimeState.STARTING, RuntimeState.STOPPING}
+                for state in self._states.values()
+            ):
+                raise RuntimeError(
+                    "Hãy đóng tất cả profile trước khi đổi số Playwright instances"
+                )
+            await self._stop_playwrights()
+            self._playwrights = [None] * playwright_instances
+            self._playwright_locks = [asyncio.Lock() for _ in range(playwright_instances)]
+            self._profile_slots.clear()
 
     @property
     def draining(self) -> bool:

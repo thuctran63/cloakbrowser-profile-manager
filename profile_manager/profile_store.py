@@ -78,8 +78,8 @@ class ProfileStore:
                 raise ValueError("API hiện chỉ cho phép bind tại 127.0.0.1")
             if not 1 <= settings.api_port <= 65535:
                 raise ValueError("API port phải nằm trong khoảng 1–65535")
-            if not 1 <= settings.max_concurrent_launches <= 20:
-                raise ValueError("Concurrent launches phải nằm trong khoảng 1–20")
+            if not 1 <= settings.playwright_instances <= 20:
+                raise ValueError("Playwright instances phải nằm trong khoảng 1–20")
             self._atomic_write(self.settings_path, settings.to_dict())
 
     def list_profiles(self) -> list[ProfileConfig]:

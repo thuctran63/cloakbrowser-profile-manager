@@ -82,6 +82,16 @@ class FakePlaywrightManager:
         return self.playwright
 
 
+class FakePlaywrightFactory:
+    def __init__(self) -> None:
+        self.playwrights = []
+
+    def __call__(self):
+        playwright = FakePlaywright()
+        self.playwrights.append(playwright)
+        return FakePlaywrightManager(playwright)
+
+
 class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -228,6 +238,51 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(playwrights[0], playwrights[1])
         self.assertTrue(all(context.closed for context in contexts))
         self.assertEqual(self.playwright.stop_calls, 1)
+
+    async def test_profiles_are_distributed_across_playwright_pool(self) -> None:
+        second_profile = ProfileConfig(
+            id="00000000-0000-0000-0000-000000000002",
+            name="Second",
+            proxy=None,
+            fingerprint_seed=54322,
+            data_dir=str(Path(self.temp.name) / "second"),
+            created_at="now",
+            updated_at="now",
+        )
+        service = BrowserService(lambda *_event: None, playwright_instances=2)
+        factory = FakePlaywrightFactory()
+        contexts = [FakeContext(), FakeContext()]
+        assigned_playwrights = []
+
+        async def launch(*_args, **kwargs):
+            assigned_playwrights.append(kwargs["playwright"])
+            return contexts[len(assigned_playwrights) - 1]
+
+        with patch("profile_manager.browser_service.async_playwright", new=factory), patch(
+            "profile_manager.browser_service.launch_persistent_context_async", launch
+        ), patch(
+            "profile_manager.browser_service.discover_cdp_url",
+            side_effect=["http://127.0.0.1:9222", "http://127.0.0.1:9223"],
+        ):
+            await asyncio.gather(service.open(self.profile), service.open(second_profile))
+            await service.close_all()
+
+        self.assertEqual(len(factory.playwrights), 2)
+        self.assertIsNot(assigned_playwrights[0], assigned_playwrights[1])
+        self.assertTrue(all(playwright.stop_calls == 1 for playwright in factory.playwrights))
+
+    async def test_pool_resize_requires_all_profiles_stopped(self) -> None:
+        context = FakeContext()
+        with patch(
+            "profile_manager.browser_service.launch_persistent_context_async",
+            return_value=context,
+        ), patch(
+            "profile_manager.browser_service.discover_cdp_url",
+            return_value="http://127.0.0.1:9222",
+        ):
+            await self.service.open(self.profile)
+            with self.assertRaisesRegex(RuntimeError, "đóng tất cả profile"):
+                await self.service.configure_runtime(2)
 
     async def test_stale_close_event_cannot_stop_reopened_profile(self) -> None:
         old_context, new_context = FakeContext(), FakeContext()

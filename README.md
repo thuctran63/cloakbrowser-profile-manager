@@ -198,9 +198,9 @@ Error envelope:
 }
 ```
 
-Settings cho phép cấu hình launch đồng thời (`1–20`) và tổng browser
-(`launch–100`). Local API không giới hạn số request/phút; giới hạn session thực
-tế vẫn phụ thuộc license/tier CloakBrowser.
+Settings cho phép cấu hình số Playwright instance (`1–20`); các lần launch được
+tuần tự hóa để tránh tăng tải đột ngột. Local API không giới hạn số request/phút;
+giới hạn session thực tế vẫn phụ thuộc license/tier CloakBrowser.
 
 ## Dữ liệu
 

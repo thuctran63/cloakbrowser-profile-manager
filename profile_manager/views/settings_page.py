@@ -30,7 +30,7 @@ class SettingsPage(ttk.Frame):
         self.api_host_var = tk.StringVar(value="127.0.0.1")
         self.api_port_var = tk.StringVar()
         self.api_key_var = tk.StringVar()
-        self.launches_var = tk.StringVar()
+        self.playwright_instances_var = tk.StringVar()
         self.show_key_var = tk.BooleanVar(value=False)
         self.feedback_var = tk.StringVar()
         self.api_url_var = tk.StringVar()
@@ -67,9 +67,9 @@ class SettingsPage(ttk.Frame):
         self.show_key_check = ttk.Checkbutton(frame, text="Hiện", variable=self.show_key_var, command=self._toggle_key)
         self.show_key_check.grid(row=11, column=1, sticky="w", padx=(8, 0))
         ttk.Label(frame, text="API key được tạo tự động. Chỉ xóa hoặc thay đổi khi chủ động xoay khóa.", style="Helper.TLabel", wraplength=620).grid(row=12, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        ttk.Label(frame, text="Giới hạn launch đồng thời", style="Surface.TLabel").grid(row=13, column=0, sticky="w", pady=(12, 0))
-        self.launches_entry = ttk.Entry(frame, textvariable=self.launches_var, width=12)
-        self.launches_entry.grid(row=14, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(frame, text="Số Playwright instances", style="Surface.TLabel").grid(row=13, column=0, sticky="w", pady=(12, 0))
+        self.playwright_instances_entry = ttk.Entry(frame, textvariable=self.playwright_instances_var, width=12)
+        self.playwright_instances_entry.grid(row=14, column=0, sticky="w", pady=(4, 0))
         self.feedback_label = ttk.Label(frame, textvariable=self.feedback_var, style="Error.TLabel")
         self.feedback_label.grid(row=15, column=0, columnspan=2, sticky="w", pady=(12, 8))
         buttons = ttk.Frame(frame, style="Surface.TFrame")
@@ -95,7 +95,7 @@ class SettingsPage(ttk.Frame):
         self.api_host_var.set(settings.api_host)
         self.api_port_var.set(str(settings.api_port))
         self.api_key_var.set(settings.api_key)
-        self.launches_var.set(str(settings.max_concurrent_launches))
+        self.playwright_instances_var.set(str(settings.playwright_instances))
         self.show_key_var.set(False)
         self._toggle_key()
         self._feedback("")
@@ -114,12 +114,12 @@ class SettingsPage(ttk.Frame):
             self._feedback("API port phải nằm trong khoảng 1–65535", error=True)
             return None
         try:
-            launches = int(self.launches_var.get().strip())
+            playwright_instances = int(self.playwright_instances_var.get().strip())
         except ValueError:
-            self._feedback("Giới hạn launch phải là số nguyên", error=True)
+            self._feedback("Số Playwright instances phải là số nguyên", error=True)
             return None
-        if not 1 <= launches <= 20:
-            self._feedback("Giới hạn launch phải nằm trong khoảng 1–20", error=True)
+        if not 1 <= playwright_instances <= 20:
+            self._feedback("Số Playwright instances phải nằm trong khoảng 1–20", error=True)
             return None
         api_key = self.api_key_var.get().strip()
         if not api_key:
@@ -128,7 +128,7 @@ class SettingsPage(ttk.Frame):
         return AppSettings(
             default_profiles_dir=str(Path(raw).expanduser().resolve()),
             api_host="127.0.0.1", api_port=port, api_key=api_key,
-            max_concurrent_launches=launches,
+            playwright_instances=playwright_instances,
         )
 
     def save(self) -> None:
@@ -166,7 +166,7 @@ class SettingsPage(ttk.Frame):
     def set_enabled(self, enabled: bool) -> None:
         self._disabled = not enabled
         state = "normal" if enabled else "disabled"
-        for widget in (self.path_entry, self.port_entry, self.key_entry, self.launches_entry, self.browse_button, self.show_key_check, self.save_button):
+        for widget in (self.path_entry, self.port_entry, self.key_entry, self.playwright_instances_entry, self.browse_button, self.show_key_check, self.save_button):
             widget.configure(state=state)
         self.host_entry.configure(state="readonly" if enabled else "disabled")
         if self.cancel_button:

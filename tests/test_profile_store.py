@@ -47,6 +47,7 @@ class ProfileStoreTests(unittest.TestCase):
         self.assertEqual(settings.api_host, "127.0.0.1")
         self.assertEqual(settings.api_port, 9123)
         self.assertEqual(settings.api_key, "secret-key")
+        self.assertEqual(settings.playwright_instances, 1)
         second = self.store.create_profile("Second")
         self.assertEqual(Path(first.data_dir).parent, Path(self.temp.name) / "profiles")
         self.assertEqual(Path(second.data_dir).parent, new_root)
@@ -64,6 +65,21 @@ class ProfileStoreTests(unittest.TestCase):
             self.store.save_settings(
                 AppSettings(str(Path(self.temp.name) / "profiles"), api_port=70_000)
             )
+        with self.assertRaises(ValueError):
+            self.store.save_settings(
+                AppSettings(
+                    str(Path(self.temp.name) / "profiles"), playwright_instances=0
+                )
+            )
+
+    def test_playwright_instances_round_trip(self) -> None:
+        settings = AppSettings(
+            str(Path(self.temp.name) / "profiles"),
+            api_key="secret-key",
+            playwright_instances=3,
+        )
+        self.store.save_settings(settings)
+        self.assertEqual(self.store.load_settings().playwright_instances, 3)
 
     def test_concurrent_creates_are_not_lost(self) -> None:
         threads = [
