@@ -66,7 +66,7 @@ Swagger UI, bấm **Authorize** rồi nhập API key bằng Bearer token hoặc
 `X-API-Key`.
 
 OpenAPI mô tả đầy đủ các endpoint hiện có: health/readiness, runtime status,
-profile CRUD, operation Open/Close bất đồng bộ và polling operation.
+profile CRUD và lifecycle Open/Close đồng bộ.
 
 ### Xác thực
 
@@ -79,12 +79,12 @@ X-API-Key: <api-key>
 
 `Authorization: Bearer` được khuyến nghị. API và CDP luôn bind tại `127.0.0.1`; không proxy chúng trực tiếp ra Internet.
 
-### Lifecycle bất đồng bộ
+### Lifecycle đồng bộ
 
-Mở browser không giữ HTTP connection trong lúc Chromium khởi động:
+Mở browser và chờ đến khi CDP sẵn sàng:
 
 ```http
-POST /api/v1/profiles/{profile_id}/operations/open
+POST /api/v1/profiles/{profile_id}/open
 ```
 
 Có thể truyền vị trí, kích thước cửa sổ native và mức page zoom theo từng lần mở:
@@ -113,36 +113,24 @@ Khi truyền `start_url` (`http://` hoặc `https://`), browser khởi động b
 app mode: không có tab bar, thanh địa chỉ hoặc toolbar. Bỏ `start_url` để mở cửa
 sổ Chromium bình thường. App mode chỉ được quyết định lúc khởi động profile.
 
-Response `202 Accepted` có `Location` và `Retry-After: 1`:
+Response `200 OK` trả endpoint trực tiếp:
 
 ```json
 {
-	"data": {
-		"id": "operation-uuid",
-		"profile_id": "profile-uuid",
-		"kind": "open",
-		"status": "running",
-		"created_at": "2026-01-01T00:00:00+00:00",
-		"started_at": "2026-01-01T00:00:00+00:00",
-		"completed_at": null,
-		"result": null,
-		"error": null
-	}
+	"profileId": "profile-uuid",
+	"status": "running",
+	"ws": "ws://127.0.0.1:9222/devtools/browser/uuid",
+	"http": "http://127.0.0.1:9222",
+	"pid": null
 }
 ```
 
-Poll URL trong `Location`:
-
-```http
-GET /api/v1/operations/{operation_id}
-```
-
-Khi thành công, `status` là `succeeded` và `result.cdp_url` chứa endpoint loopback. Khi thất bại, `status` là `failed` và `error` chứa code/message đã lọc. Gọi Open nhiều lần trong lúc operation đang chạy dùng chung operation; Open một profile đã chạy trả lại cùng CDP URL.
+`pid` hiện là `null` vì Playwright persistent-context API không expose process ID công khai. Gọi Open đồng thời cho cùng profile được serialize và chỉ launch một Chromium; Open profile đã chạy trả lại cùng CDP URL.
 
 Đóng browser tương tự:
 
 ```http
-POST /api/v1/profiles/{profile_id}/operations/close
+POST /api/v1/profiles/{profile_id}/close
 ```
 
 ### Kết nối Playwright

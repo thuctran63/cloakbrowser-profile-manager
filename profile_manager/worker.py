@@ -9,10 +9,16 @@ from concurrent.futures import Future
 from typing import Any
 
 
+class WorkerUnavailableError(RuntimeError):
+    pass
+
+
 class AsyncWorker:
     def __init__(self) -> None:
         self._loop = asyncio.new_event_loop()
         self._ready = threading.Event()
+        self._state_lock = threading.Lock()
+        self._stopping = False
         self._thread = threading.Thread(target=self._run, name="browser-worker", daemon=True)
         self._thread.start()
         self._ready.wait()
@@ -29,15 +35,29 @@ class AsyncWorker:
         self._loop.close()
 
     def submit(self, coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
-        if not self._thread.is_alive():
-            raise RuntimeError("Browser worker đã dừng")
-        return asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+        with self._state_lock:
+            if self._stopping or not self._thread.is_alive() or not self._loop.is_running():
+                coroutine.close()
+                raise WorkerUnavailableError("Browser worker đã dừng")
+            try:
+                return asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+            except Exception:
+                coroutine.close()
+                raise
 
     @property
     def is_alive(self) -> bool:
         return self._thread.is_alive() and self._loop.is_running()
 
     def stop(self, timeout: float = 5.0) -> None:
-        if self._thread.is_alive():
+        with self._state_lock:
+            if self._stopping:
+                should_stop = False
+            else:
+                self._stopping = True
+                should_stop = self._thread.is_alive()
+        if should_stop:
             self._loop.call_soon_threadsafe(self._loop.stop)
             self._thread.join(timeout=timeout)
+        if self._thread.is_alive():
+            raise TimeoutError("Browser worker không dừng đúng hạn")

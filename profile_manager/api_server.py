@@ -6,17 +6,18 @@ import json
 import secrets
 import threading
 import uuid
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
 
-from .browser_service import BrowserService
+from .browser_service import BrowserService, CLOSE_TIMEOUT, LAUNCH_TIMEOUT
+from .devtools import get_cdp_websocket_url
 from .models import OpenOptions, ProfileConfig, ProfileSettings
 from .openapi import SWAGGER_UI_HTML, build_openapi
-from .operations import OperationRegistry
 from .profile_store import ProfileStore
-from .worker import AsyncWorker
+from .worker import AsyncWorker, WorkerUnavailableError
 
 
 class PayloadTooLargeError(ValueError):
@@ -39,7 +40,6 @@ class ProfileApiServer:
         self.browser_service = browser_service
         self.api_key = api_key
         self.max_body_bytes = max_body_bytes
-        self.operations = OperationRegistry()
         self._server = ThreadingHTTPServer((host, port), self._handler_class())
         self._thread = threading.Thread(
             target=self._server.serve_forever, name="profile-api", daemon=True
@@ -63,6 +63,8 @@ class ProfileApiServer:
         api = self
 
         class Handler(BaseHTTPRequestHandler):
+            timeout = LAUNCH_TIMEOUT + 10
+
             def do_GET(self) -> None:
                 self._dispatch("GET")
 
@@ -79,15 +81,15 @@ class ProfileApiServer:
                 request_id = str(uuid.uuid4())
                 try:
                     path = urlparse(self.path).path.rstrip("/") or "/"
-                    supplied_key = self.headers.get("Authorization", "").removeprefix("Bearer ") or self.headers.get("X-API-Key", "")
-                    if api.api_key and not secrets.compare_digest(supplied_key, api.api_key):
-                        self._error(HTTPStatus.UNAUTHORIZED, "invalid_api_key", "API key không hợp lệ", request_id)
-                        return
                     if path == "/openapi.json" and method == "GET":
                         self._json(HTTPStatus.OK, build_openapi(api.address))
                         return
                     if path == "/docs" and method == "GET":
                         self._html(HTTPStatus.OK, SWAGGER_UI_HTML)
+                        return
+                    supplied_key = self.headers.get("Authorization", "").removeprefix("Bearer ") or self.headers.get("X-API-Key", "")
+                    if api.api_key and not secrets.compare_digest(supplied_key, api.api_key):
+                        self._error(HTTPStatus.UNAUTHORIZED, "invalid_api_key", "API key không hợp lệ", request_id)
                         return
                     parts = path.split("/")
                     if path == "/health" and method == "GET":
@@ -98,14 +100,16 @@ class ProfileApiServer:
                         ready = api.store.ping() and api.worker.is_alive and not api.browser_service.draining
                         self._json(HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE, {"status": "ready" if ready else "not_ready"})
                     elif path == "/api/v1/status" and method == "GET":
-                        self._json(HTTPStatus.OK, {"data": {**api.browser_service.counts(), "active_operations": api.operations.active_count(), "worker_alive": api.worker.is_alive, "draining": api.browser_service.draining}})
+                        self._json(HTTPStatus.OK, {"data": {**api.browser_service.counts(), "worker_alive": api.worker.is_alive, "draining": api.browser_service.draining}})
                     elif path == "/api/v1/diagnostics" and method == "GET":
                         result = api.worker.submit(api.browser_service.diagnostics()).result(timeout=30)
                         self._json(HTTPStatus.OK, {"data": result})
-                    elif len(parts) == 5 and parts[1:4] == ["api", "v1", "operations"] and method == "GET":
-                        self._json(HTTPStatus.OK, {"data": api.operations.get(parts[4]).to_dict()})
-                    elif len(parts) == 7 and parts[1:4] == ["api", "v1", "profiles"] and parts[5] == "operations":
-                        self._operation_route(method, parts[4], parts[6])
+                    elif path == "/api/v1/profiles/close-all" and method == "POST":
+                        profile_ids = [profile.id for profile in api.store.list_profiles()]
+                        result = api.worker.submit(api.browser_service.close_active(profile_ids)).result(timeout=CLOSE_TIMEOUT + 5)
+                        self._json(HTTPStatus.OK, result)
+                    elif len(parts) == 6 and parts[1:4] == ["api", "v1", "profiles"] and parts[5] in {"open", "close", "status"}:
+                        self._lifecycle_route(method, parts[4], parts[5])
                     elif len(parts) == 6 and parts[1:4] == ["api", "v1", "profiles"] and parts[5] == "preflight" and method == "POST":
                         profile = self._find_profile(parts[4])
                         result = api.worker.submit(api.browser_service.preflight(profile)).result(timeout=60)
@@ -128,6 +132,10 @@ class ProfileApiServer:
                     self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "payload_too_large", str(exc), request_id)
                 except (ValueError, json.JSONDecodeError) as exc:
                     self._error(HTTPStatus.BAD_REQUEST, "invalid_request", str(exc), request_id)
+                except WorkerUnavailableError:
+                    self._error(HTTPStatus.SERVICE_UNAVAILABLE, "worker_unavailable", "Browser worker không khả dụng", request_id)
+                except FutureTimeoutError:
+                    self._error(HTTPStatus.REQUEST_TIMEOUT, "browser_operation_timeout", "Browser operation quá thời hạn", request_id)
                 except Exception:
                     self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error", "Lỗi nội bộ", request_id)
 
@@ -158,21 +166,23 @@ class ProfileApiServer:
                         {"Allow": "GET, PATCH, DELETE"},
                     )
 
-            def _operation_route(self, method: str, profile_id: str, action: str) -> None:
-                if method != "POST" or action not in {"open", "close"}:
+            def _lifecycle_route(self, method: str, profile_id: str, action: str) -> None:
+                expected_method = "GET" if action == "status" else "POST"
+                if method != expected_method:
                     raise KeyError("Endpoint không tồn tại")
                 profile = self._find_profile(profile_id)
-                options = OpenOptions.from_dict(self._body()) if action == "open" else None
-                operation, created = api.operations.create(profile_id, action)
-                if created:
-                    api.operations.start(operation.id)
-                    coroutine = api.browser_service.open(profile, options) if action == "open" else api.browser_service.close(profile_id)
-                    api.operations.observe(operation.id, api.worker.submit(coroutine))
-                payload = {"data": operation.to_dict()}
-                self.send_response(HTTPStatus.ACCEPTED)
-                self.send_header("Location", f"/api/v1/operations/{operation.id}")
-                self.send_header("Retry-After", "1")
-                self._send_json_headers(payload)
+                if action == "status":
+                    snapshot = api.worker.submit(api.browser_service.runtime_snapshot(profile_id)).result(timeout=5)
+                    self._json(HTTPStatus.OK, snapshot)
+                    return
+                if action == "close":
+                    api.worker.submit(api.browser_service.close(profile_id)).result(timeout=CLOSE_TIMEOUT + 5)
+                    self._json(HTTPStatus.OK, {"profileId": profile_id, "status": "stopped"})
+                    return
+                options = OpenOptions.from_dict(self._body())
+                http_url = api.worker.submit(api.browser_service.open(profile, options)).result(timeout=LAUNCH_TIMEOUT + 5)
+                websocket_url = get_cdp_websocket_url(http_url)
+                self._json(HTTPStatus.OK, {"profileId": profile_id, "status": "running", "ws": websocket_url, "http": http_url, "pid": None})
 
             def _find_profile(self, profile_id: str) -> ProfileConfig:
                 return api.store.get_profile(profile_id)

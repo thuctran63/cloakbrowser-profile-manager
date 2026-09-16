@@ -4,7 +4,6 @@ import json
 import sys
 import tempfile
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -44,17 +43,6 @@ def request(base: str, method: str, path: str, body: dict | None = None) -> tupl
         return response.status, json.load(response)
 
 
-def poll(base: str, operation_id: str) -> dict:
-    deadline = time.monotonic() + 90
-    while time.monotonic() < deadline:
-        _, payload = request(base, "GET", f"/api/v1/operations/{operation_id}")
-        operation = payload["data"]
-        if operation["status"] in {"succeeded", "failed"}:
-            return operation
-        time.sleep(0.25)
-    raise TimeoutError("Operation did not finish")
-
-
 def main() -> None:
     web_server = ThreadingHTTPServer(("127.0.0.1", 0), TestPageHandler)
     web_thread = threading.Thread(target=web_server.serve_forever, daemon=True)
@@ -68,10 +56,10 @@ def main() -> None:
         server = ProfileApiServer(store, worker, service, port=0)
         server.start()
         try:
-            status, accepted = request(
+            status, opened = request(
                 server.address,
                 "POST",
-                f"/api/v1/profiles/{profile.id}/operations/open",
+                f"/api/v1/profiles/{profile.id}/open",
                 {
                     "pos_x": 8,
                     "pos_y": 8,
@@ -81,10 +69,9 @@ def main() -> None:
                     "start_url": f"http://127.0.0.1:{web_server.server_port}/",
                 },
             )
-            assert status == 202
-            opened = poll(server.address, accepted["data"]["id"])
-            assert opened["status"] == "succeeded", opened
-            cdp_url = opened["result"]["cdp_url"]
+            assert status == 200
+            assert opened["status"] == "running", opened
+            cdp_url = opened["http"]
 
             with sync_playwright() as playwright:
                 browser = playwright.chromium.connect_over_cdp(cdp_url)
@@ -112,14 +99,13 @@ def main() -> None:
             assert bounds["width"] == 600 and bounds["height"] == 400, bounds
             print(json.dumps({"open_status": opened["status"], "cdp_url": cdp_url, "metrics": metrics, "window_bounds": bounds}, ensure_ascii=False))
 
-            _, close_accepted = request(
+            close_status, closed = request(
                 server.address,
                 "POST",
-                f"/api/v1/profiles/{profile.id}/operations/close",
+                f"/api/v1/profiles/{profile.id}/close",
             )
-            closed = poll(server.address, close_accepted["data"]["id"])
-            assert closed["status"] == "succeeded", closed
-            print("close_status=succeeded")
+            assert close_status == 200 and closed["status"] == "stopped", closed
+            print("close_status=stopped")
         finally:
             worker.submit(service.close_all()).result(timeout=15)
             server.stop()

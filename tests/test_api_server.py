@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-import time
 from pathlib import Path
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -28,7 +28,8 @@ class ProfileApiServerTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.server.stop()
-        self.worker.submit(self.service.close_all()).result(timeout=5)
+        if self.worker.is_alive:
+            self.worker.submit(self.service.close_all()).result(timeout=5)
         self.worker.stop()
         self.temp.cleanup()
 
@@ -81,9 +82,10 @@ class ProfileApiServerTests(unittest.TestCase):
             "/health/ready",
             "/api/v1/status",
             "/api/v1/diagnostics",
-            "/api/v1/operations/{operation_id}",
-            "/api/v1/profiles/{profile_id}/operations/open",
-            "/api/v1/profiles/{profile_id}/operations/close",
+            "/api/v1/profiles/{profile_id}/open",
+            "/api/v1/profiles/{profile_id}/close",
+            "/api/v1/profiles/{profile_id}/status",
+            "/api/v1/profiles/close-all",
             "/api/v1/profiles/{profile_id}/preflight",
             "/api/v1/profiles",
             "/api/v1/profiles/{profile_id}",
@@ -93,15 +95,19 @@ class ProfileApiServerTests(unittest.TestCase):
         self.assertIn("bearerAuth", document["components"]["securitySchemes"])
         self.assertIn("apiKeyAuth", document["components"]["securitySchemes"])
 
-    def test_swagger_ui_is_available_with_authentication(self) -> None:
-        request = Request(self.server.address + "/docs", headers={"X-API-Key": "test-key"}, method="GET")
+    def test_swagger_ui_is_available_without_authentication(self) -> None:
+        request = Request(self.server.address + "/docs", method="GET")
         with urlopen(request, timeout=5) as response:
             content = response.read().decode("utf-8")
         self.assertEqual(response.status, 200)
         self.assertIn("SwaggerUIBundle", content)
         self.assertIn("/openapi.json", content)
 
-    def test_v1_open_returns_pollable_operation(self) -> None:
+        status, document = self.request("GET", "/openapi.json", authenticated=False)
+        self.assertEqual(status, 200)
+        self.assertEqual(document["openapi"], "3.1.0")
+
+    def test_v1_open_returns_runtime_directly(self) -> None:
         _, profile = self.request("POST", "/api/profiles", {"name": "Operation"})
 
         received_options = []
@@ -111,9 +117,13 @@ class ProfileApiServerTests(unittest.TestCase):
             return "http://127.0.0.1:9222"
 
         self.service.open = open_profile
-        status, accepted = self.request(
+        with patch(
+            "profile_manager.api_server.get_cdp_websocket_url",
+            return_value="ws://127.0.0.1:9222/devtools/browser/test",
+        ):
+            status, opened = self.request(
             "POST",
-            f"/api/v1/profiles/{profile['id']}/operations/open",
+            f"/api/v1/profiles/{profile['id']}/open",
             {
                 "pos_x": 8,
                 "pos_y": 8,
@@ -122,16 +132,11 @@ class ProfileApiServerTests(unittest.TestCase):
                 "page_zoom": 75,
                 "start_url": "https://www.facebook.com",
             },
-        )
-        self.assertEqual(status, 202)
-        operation_id = accepted["data"]["id"]
-        deadline = time.monotonic() + 2
-        while time.monotonic() < deadline:
-            _, polled = self.request("GET", f"/api/v1/operations/{operation_id}")
-            if polled["data"]["status"] == "succeeded":
-                break
-            time.sleep(0.01)
-        self.assertEqual(polled["data"]["result"]["cdp_url"], "http://127.0.0.1:9222")
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(opened["http"], "http://127.0.0.1:9222")
+        self.assertEqual(opened["ws"], "ws://127.0.0.1:9222/devtools/browser/test")
+        self.assertIsNone(opened["pid"])
         self.assertEqual(received_options[0].pos_x, 8)
         self.assertEqual(received_options[0].width, 470)
         self.assertEqual(received_options[0].page_zoom, 75)
@@ -142,7 +147,7 @@ class ProfileApiServerTests(unittest.TestCase):
         with self.assertRaises(HTTPError) as raised:
             self.request(
                 "POST",
-                f"/api/v1/profiles/{profile['id']}/operations/open",
+                f"/api/v1/profiles/{profile['id']}/open",
                 {"pos_x": 8},
             )
         self.assertEqual(raised.exception.code, 400)
@@ -152,7 +157,7 @@ class ProfileApiServerTests(unittest.TestCase):
         with self.assertRaises(HTTPError) as raised:
             self.request(
                 "POST",
-                f"/api/v1/profiles/{profile['id']}/operations/open",
+                f"/api/v1/profiles/{profile['id']}/open",
                 {"start_url": "file:///etc/passwd"},
             )
         self.assertEqual(raised.exception.code, 400)
@@ -163,3 +168,27 @@ class ProfileApiServerTests(unittest.TestCase):
         status, body = self.request("GET", "/api/v1/status")
         self.assertEqual(status, 200)
         self.assertTrue(body["data"]["worker_alive"])
+
+    def test_close_and_status_are_synchronous_and_idempotent(self) -> None:
+        _, profile = self.request("POST", "/api/v1/profiles", {"name": "Close"})
+        status, closed = self.request("POST", f"/api/v1/profiles/{profile['id']}/close")
+        self.assertEqual(status, 200)
+        self.assertEqual(closed, {"profileId": profile["id"], "status": "stopped"})
+        status, snapshot = self.request("GET", f"/api/v1/profiles/{profile['id']}/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(snapshot["status"], "stopped")
+
+    def test_close_all_does_not_drain_service(self) -> None:
+        _, profile = self.request("POST", "/api/v1/profiles", {"name": "Close all"})
+        self.service._states[profile["id"]] = self.service.state(profile["id"])
+        status, result = self.request("POST", "/api/v1/profiles/close-all")
+        self.assertEqual(status, 200)
+        self.assertEqual(result, {"closed": [], "failed": []})
+        self.assertFalse(self.service.draining)
+
+    def test_worker_unavailable_returns_503(self) -> None:
+        _, profile = self.request("POST", "/api/v1/profiles", {"name": "Unavailable"})
+        self.worker.stop()
+        with self.assertRaises(HTTPError) as raised:
+            self.request("POST", f"/api/v1/profiles/{profile['id']}/open")
+        self.assertEqual(raised.exception.code, 503)

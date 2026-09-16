@@ -30,8 +30,21 @@ class FakeContext:
     async def new_cdp_session(self, page):
         return FakeCdpSession()
 
+    async def new_page(self):
+        page = FakePage()
+        self.pages.append(page)
+        handler = self.handlers.get("page")
+        if handler:
+            handler(page)
+        return page
+
     async def add_init_script(self, script):
         self.init_script = script
+
+
+class DriverClosedContext(FakeContext):
+    async def close(self) -> None:
+        raise RuntimeError("LifecycleOperationError: Connection closed while reading from the driver")
 
 
 class FakeCdpSession:
@@ -137,7 +150,7 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(kwargs["extension_paths"])
             self.assertEqual(kwargs["proxy"], self.profile.proxy)
             self.assertFalse(kwargs["stealth_args"])
-            self.assertTrue(kwargs["geoip"])
+            self.assertFalse(kwargs["geoip"])
             self.assertEqual(kwargs["release_channel"], "stable")
             self.assertFalse(kwargs["humanize"])
             self.assertTrue(kwargs["chromium_sandbox"])
@@ -156,6 +169,45 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(context.closed)
         self.assertIsNone(self.service.cdp_url(self.profile.id))
         self.assertEqual(self.service.state(self.profile.id), RuntimeState.STOPPED)
+
+    async def test_dialog_handler_is_installed_on_every_new_page(self) -> None:
+        context = FakeContext()
+        context.pages = []
+
+        with patch(
+            "profile_manager.browser_service.launch_persistent_context_async",
+            return_value=context,
+        ), patch(
+            "profile_manager.browser_service.discover_cdp_url",
+            return_value="http://127.0.0.1:9222",
+        ):
+            await self.service.open(self.profile)
+            first_page = context.pages[0]
+            second_page = await context.new_page()
+
+        self.assertIn("dialog", first_page.handlers)
+        self.assertIn("dialog", second_page.handlers)
+
+    async def test_close_recovers_from_dead_playwright_driver(self) -> None:
+        dead_context = DriverClosedContext()
+        replacement_context = FakeContext()
+
+        with patch(
+            "profile_manager.browser_service.launch_persistent_context_async",
+            side_effect=[dead_context, replacement_context],
+        ), patch(
+            "profile_manager.browser_service.discover_cdp_url",
+            side_effect=["http://127.0.0.1:9222", "http://127.0.0.1:9223"],
+        ):
+            await self.service.open(self.profile)
+            await self.service.close(self.profile.id)
+            self.assertEqual(self.service.state(self.profile.id), RuntimeState.STOPPED)
+            self.assertIsNone(self.service._playwrights[0])
+
+            reopened = await self.service.open(self.profile)
+
+        self.assertEqual(reopened, "http://127.0.0.1:9223")
+        self.assertIs(self.service._contexts[self.profile.id], replacement_context)
 
     async def test_open_loads_managed_extensions(self) -> None:
         context = FakeContext()
@@ -270,6 +322,44 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(factory.playwrights), 2)
         self.assertIsNot(assigned_playwrights[0], assigned_playwrights[1])
         self.assertTrue(all(playwright.stop_calls == 1 for playwright in factory.playwrights))
+
+    async def test_profiles_launch_concurrently(self) -> None:
+        second_profile = ProfileConfig(
+            id="00000000-0000-0000-0000-000000000002",
+            name="Second",
+            proxy=None,
+            fingerprint_seed=54322,
+            data_dir=str(Path(self.temp.name) / "second"),
+            created_at="now",
+            updated_at="now",
+        )
+        both_started = asyncio.Event()
+        release = asyncio.Event()
+        started = 0
+
+        async def launch(*_args, **_kwargs):
+            nonlocal started
+            started += 1
+            if started == 2:
+                both_started.set()
+            await release.wait()
+            return FakeContext()
+
+        with patch(
+            "profile_manager.browser_service.launch_persistent_context_async", launch
+        ), patch(
+            "profile_manager.browser_service.discover_cdp_url",
+            side_effect=["http://127.0.0.1:9222", "http://127.0.0.1:9223"],
+        ):
+            tasks = [
+                asyncio.create_task(self.service.open(self.profile)),
+                asyncio.create_task(self.service.open(second_profile)),
+            ]
+            await asyncio.wait_for(both_started.wait(), timeout=1)
+            release.set()
+            await asyncio.gather(*tasks)
+
+        self.assertEqual(started, 2)
 
     async def test_pool_resize_requires_all_profiles_stopped(self) -> None:
         context = FakeContext()

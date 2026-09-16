@@ -33,14 +33,6 @@ def build_openapi(server_url: str) -> dict[str, Any]:
         "description": "Profile UUID",
         "schema": {"type": "string", "format": "uuid"},
     }
-    operation_id = {
-        "name": "operation_id",
-        "in": "path",
-        "required": True,
-        "description": "Lifecycle operation UUID",
-        "schema": {"type": "string", "format": "uuid"},
-    }
-
     def operation(summary: str, tag: str, responses: dict[str, Any], **extra: Any) -> dict[str, Any]:
         return {
             "summary": summary,
@@ -57,7 +49,7 @@ def build_openapi(server_url: str) -> dict[str, Any]:
             "version": __version__,
             "description": (
                 "Localhost API for persistent profile CRUD, browser lifecycle, and CDP automation. "
-                "An API key is generated automatically. Prefer asynchronous v1 lifecycle endpoints."
+                "An API key is generated automatically. Lifecycle endpoints wait for completion."
             ),
         },
         "servers": [{"url": server_url, "description": "Local profile manager"}],
@@ -65,7 +57,6 @@ def build_openapi(server_url: str) -> dict[str, Any]:
             {"name": "Health"},
             {"name": "Status"},
             {"name": "Profiles"},
-            {"name": "Operations"},
         ],
         "paths": {
             "/health": {
@@ -90,33 +81,39 @@ def build_openapi(server_url: str) -> dict[str, Any]:
             "/api/v1/diagnostics": {
                 "get": operation("Get wrapper, binary and runtime diagnostics", "Status", {"200": _response("Diagnostics", "DiagnosticsResponse")})
             },
-            "/api/v1/operations/{operation_id}": {
-                "get": operation(
-                    "Get lifecycle operation",
-                    "Operations",
-                    {"200": _response("Operation state", "OperationResponse")},
-                    parameters=[operation_id],
-                )
-            },
-            "/api/v1/profiles/{profile_id}/operations/open": {
+            "/api/v1/profiles/{profile_id}/open": {
                 "post": operation(
-                    "Open profile asynchronously",
-                    "Operations",
-                    {"202": _response("Operation accepted", "OperationResponse")},
+                    "Open profile and wait until CDP is ready",
+                    "Profiles",
+                    {"200": _response("Profile is running", "OpenResponse"), "408": _response("Launch timed out", "ErrorResponse"), "503": _response("Browser worker unavailable", "ErrorResponse")},
                     parameters=[profile_id],
-                    description="Returns Location and Retry-After headers. Poll the operation until succeeded or failed.",
                     requestBody={
                         "required": False,
                         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OpenOptions"}}},
                     },
                 )
             },
-            "/api/v1/profiles/{profile_id}/operations/close": {
+            "/api/v1/profiles/{profile_id}/close": {
                 "post": operation(
-                    "Close profile asynchronously",
-                    "Operations",
-                    {"202": _response("Operation accepted", "OperationResponse")},
+                    "Close profile and wait until stopped",
+                    "Profiles",
+                    {"200": _response("Profile is stopped", "CloseResponse"), "408": _response("Close timed out", "ErrorResponse"), "503": _response("Browser worker unavailable", "ErrorResponse")},
                     parameters=[profile_id],
+                )
+            },
+            "/api/v1/profiles/{profile_id}/status": {
+                "get": operation(
+                    "Read cached profile runtime status",
+                    "Profiles",
+                    {"200": _response("Runtime status", "ProfileStatusResponse"), "503": _response("Browser worker unavailable", "ErrorResponse")},
+                    parameters=[profile_id],
+                )
+            },
+            "/api/v1/profiles/close-all": {
+                "post": operation(
+                    "Close all active profiles without draining the service",
+                    "Profiles",
+                    {"200": _response("Close results", "CloseAllResponse"), "408": _response("Close timed out", "ErrorResponse"), "503": _response("Browser worker unavailable", "ErrorResponse")},
                 )
             },
             "/api/v1/profiles/{profile_id}/preflight": {
@@ -216,23 +213,11 @@ def build_openapi(server_url: str) -> dict[str, Any]:
                     },
                 },
                 "ProfileList": {"type": "object", "required": ["profiles"], "properties": {"profiles": {"type": "array", "items": {"$ref": "#/components/schemas/Profile"}}}},
-                "Operation": {
-                    "type": "object",
-                    "required": ["id", "profile_id", "kind", "status", "created_at"],
-                    "properties": {
-                        "id": {"type": "string", "format": "uuid"},
-                        "profile_id": {"type": "string", "format": "uuid"},
-                        "kind": {"type": "string", "enum": ["open", "close"]},
-                        "status": {"type": "string", "enum": ["queued", "running", "succeeded", "failed"]},
-                        "created_at": {"type": "string", "format": "date-time"},
-                        "started_at": {"type": ["string", "null"], "format": "date-time"},
-                        "completed_at": {"type": ["string", "null"], "format": "date-time"},
-                        "result": {"type": ["object", "null"], "additionalProperties": True},
-                        "error": {"type": ["object", "null"], "additionalProperties": True},
-                    },
-                },
-                "OperationResponse": {"type": "object", "required": ["data"], "properties": {"data": {"$ref": "#/components/schemas/Operation"}}},
-                "StatusResponse": {"type": "object", "properties": {"data": {"type": "object", "required": ["running", "starting", "active_operations", "worker_alive", "draining"], "properties": {"running": {"type": "integer"}, "starting": {"type": "integer"}, "active_operations": {"type": "integer"}, "worker_alive": {"type": "boolean"}, "draining": {"type": "boolean"}}}}},
+                "OpenResponse": {"type": "object", "required": ["profileId", "status", "ws", "http", "pid"], "properties": {"profileId": {"type": "string", "format": "uuid"}, "status": {"const": "running"}, "ws": {"type": "string", "format": "uri"}, "http": {"type": "string", "format": "uri"}, "pid": {"type": ["integer", "null"]}}},
+                "CloseResponse": {"type": "object", "required": ["profileId", "status"], "properties": {"profileId": {"type": "string", "format": "uuid"}, "status": {"const": "stopped"}}},
+                "ProfileStatusResponse": {"type": "object", "required": ["profileId", "status", "http"], "properties": {"profileId": {"type": "string", "format": "uuid"}, "status": {"type": "string", "enum": ["stopped", "starting", "running", "stopping", "error"]}, "http": {"type": ["string", "null"], "format": "uri"}}},
+                "CloseAllResponse": {"type": "object", "required": ["closed", "failed"], "properties": {"closed": {"type": "array", "items": {"type": "string", "format": "uuid"}}, "failed": {"type": "array", "items": {"type": "object", "required": ["id", "error"], "properties": {"id": {"type": "string", "format": "uuid"}, "error": {"type": "string"}}}}}},
+                "StatusResponse": {"type": "object", "properties": {"data": {"type": "object", "required": ["running", "starting", "worker_alive", "draining"], "properties": {"running": {"type": "integer"}, "starting": {"type": "integer"}, "worker_alive": {"type": "boolean"}, "draining": {"type": "boolean"}}}}},
                 "DiagnosticsResponse": {"type": "object", "properties": {"data": {"type": "object", "additionalProperties": True}}},
                 "PreflightResponse": {"type": "object", "properties": {"data": {"type": "object", "additionalProperties": True}}},
                 "HealthOk": {"type": "object", "properties": {"status": {"const": "ok"}}},

@@ -20,6 +20,29 @@ from .devtools import discover_cdp_url
 from .proxy import redact_proxy_in_text
 
 StateCallback = Callable[[str, RuntimeState, str | None], None]
+LAUNCH_TIMEOUT = 60.0
+CLOSE_TIMEOUT = 15.0
+
+
+def install_dialog_handler(page: Any) -> None:
+    """Accept browser dialogs, ignoring only Playwright's stale-dialog race."""
+    on = getattr(page, "on", None)
+    if not callable(on):
+        return
+
+    async def accept_dialog(dialog: Any) -> None:
+        try:
+            await dialog.accept()
+        except Exception as exc:
+            if "no dialog is showing" not in str(exc).casefold():
+                raise
+
+    on("dialog", accept_dialog)
+
+
+def _is_driver_connection_closed(exc: BaseException) -> bool:
+    message = str(exc).casefold()
+    return "connection closed while reading from the driver" in message
 
 
 class BrowserService:
@@ -38,7 +61,6 @@ class BrowserService:
         self._closing: set[str] = set()
         self._locks: dict[str, asyncio.Lock] = {}
         self._generation: dict[str, int] = {}
-        self._launch_slots = asyncio.Semaphore(1)
         self._extension_library = extension_library
         self._draining = False
         self._playwrights: list[Any | None] = [None] * playwright_instances
@@ -137,11 +159,11 @@ class BrowserService:
                 launch_args.append(f"--window-size={options.width},{options.height}")
             if options.start_url is not None:
                 launch_args.append(f"--app={options.start_url}")
-            async with self._launch_slots:
-                extension_paths = (
-                    [str(path) for path in self._extension_library.launch_paths(profile.id)]
-                    if self._extension_library else []
-                )
+            extension_paths = (
+                [str(path) for path in self._extension_library.launch_paths(profile.id)]
+                if self._extension_library else []
+            )
+            async with asyncio.timeout(LAUNCH_TIMEOUT):
                 context = await launch_persistent_context_async(
                     profile.user_data_dir,
                     headless=False,
@@ -149,7 +171,7 @@ class BrowserService:
                     stealth_args=False,
                     args=launch_args,
                     extension_paths=extension_paths or None,
-                    geoip=profile.geoip,
+                    geoip=False,
                     timezone=profile.timezone,
                     locale=profile.locale,
                     browser_version=profile.browser_version,
@@ -160,12 +182,16 @@ class BrowserService:
                     playwright=await self._get_playwright(profile.id),
                 )
             self._contexts[profile.id] = context
+            assert context is not None
             context.on(
                 "close",
                 lambda *_args: asyncio.get_running_loop().create_task(
                     self._handle_context_closed(profile.id, generation, context)
                 ),
             )
+            context.on("page", install_dialog_handler)
+            for page in context.pages:
+                install_dialog_handler(page)
             cdp_url = await discover_cdp_url(profile.user_data_dir, started_at)
             self._cdp_urls[profile.id] = cdp_url
             if not context.pages:
@@ -173,7 +199,7 @@ class BrowserService:
             await self._apply_open_options(context, options)
             self._set_state(profile.id, RuntimeState.RUNNING)
             return cdp_url
-        except Exception as exc:
+        except BaseException as exc:
             self._contexts.pop(profile.id, None)
             self._cdp_urls.pop(profile.id, None)
             self._profile_slots.pop(profile.id, None)
@@ -182,8 +208,13 @@ class BrowserService:
                     await context.close()
                 except Exception:
                     pass
+            if isinstance(exc, asyncio.CancelledError):
+                self._set_state(profile.id, RuntimeState.STOPPED)
+                raise
             message = redact_proxy_in_text(str(exc), profile.proxy)
             self._set_state(profile.id, RuntimeState.ERROR, message)
+            if isinstance(exc, TimeoutError):
+                raise TimeoutError(message) from exc
             raise RuntimeError(message) from exc
 
     async def list_extensions(self) -> list[ExtensionInfo]:
@@ -316,9 +347,32 @@ class BrowserService:
 
         self._closing.add(profile_id)
         self._set_state(profile_id, RuntimeState.STOPPING)
+        slot = self._profile_slots.get(profile_id)
         try:
-            await context.close()
+            async with asyncio.timeout(CLOSE_TIMEOUT):
+                await context.close()
+        except Exception as exc:
+            if not _is_driver_connection_closed(exc):
+                raise
+            if slot is not None:
+                await self._invalidate_playwright_slot(slot)
         finally:
+            self._contexts.pop(profile_id, None)
+            self._cdp_urls.pop(profile_id, None)
+            self._profile_slots.pop(profile_id, None)
+            self._closing.discard(profile_id)
+            self._set_state(profile_id, RuntimeState.STOPPED)
+
+    async def _invalidate_playwright_slot(self, slot: int) -> None:
+        """Forget a dead driver and all contexts controlled by it."""
+        async with self._playwright_locks[slot]:
+            self._playwrights[slot] = None
+        affected = [
+            profile_id
+            for profile_id, assigned_slot in self._profile_slots.items()
+            if assigned_slot == slot
+        ]
+        for profile_id in affected:
             self._contexts.pop(profile_id, None)
             self._cdp_urls.pop(profile_id, None)
             self._profile_slots.pop(profile_id, None)
@@ -350,6 +404,33 @@ class BrowserService:
             )
         self._profile_slots.clear()
         await self._stop_playwrights()
+
+    async def runtime_snapshot(self, profile_id: str) -> dict[str, str | None]:
+        return {
+            "profileId": profile_id,
+            "status": self.state(profile_id).value.casefold(),
+            "http": self.cdp_url(profile_id),
+        }
+
+    async def close_active(self, profile_ids: list[str]) -> dict[str, list[Any]]:
+        active = [
+            profile_id
+            for profile_id in profile_ids
+            if self.state(profile_id) != RuntimeState.STOPPED
+            or profile_id in self._contexts
+        ]
+        results = await asyncio.gather(
+            *(self.close(profile_id) for profile_id in active),
+            return_exceptions=True,
+        )
+        return {
+            "closed": [profile_id for profile_id, result in zip(active, results) if not isinstance(result, BaseException)],
+            "failed": [
+                {"id": profile_id, "error": str(result)}
+                for profile_id, result in zip(active, results)
+                if isinstance(result, BaseException)
+            ],
+        }
 
     async def _get_playwright(self, profile_id: str) -> Any:
         slot = self._profile_slots.get(profile_id)

@@ -40,3 +40,13 @@ def _validate_cdp(url: str, port: int) -> None:
     websocket_url = str(data.get("webSocketDebuggerUrl", ""))
     if f":{port}/devtools/browser/" not in websocket_url:
         raise ValueError("CDP endpoint không khớp browser vừa mở")
+
+
+def get_cdp_websocket_url(url: str) -> str:
+    """Return the validated browser WebSocket endpoint for a CDP HTTP URL."""
+    with urlopen(f"{url}/json/version", timeout=2) as response:
+        data = json.load(response)
+    websocket_url = str(data.get("webSocketDebuggerUrl", ""))
+    if not websocket_url.startswith("ws://127.0.0.1:") or "/devtools/browser/" not in websocket_url:
+        raise ValueError("CDP WebSocket endpoint không hợp lệ")
+    return websocket_url
