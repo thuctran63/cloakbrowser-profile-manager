@@ -399,7 +399,7 @@ class ProfileManagerApp:
         self.delete_button.configure(state="normal" if active and state == RuntimeState.STOPPED else "disabled")
         self.extensions_button.configure(state="disabled" if self.shutting_down else "normal")
         self.open_button.configure(state="normal" if active and state in {RuntimeState.STOPPED, RuntimeState.ERROR} else "disabled")
-        self.close_button.configure(state="normal" if active and state == RuntimeState.RUNNING else "disabled")
+        self.close_button.configure(state="normal" if active and state in {RuntimeState.RUNNING, RuntimeState.ERROR} else "disabled")
 
     def shutdown(self) -> None:
         if self.shutting_down:

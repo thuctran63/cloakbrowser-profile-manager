@@ -124,11 +124,17 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
             return_value=FakePlaywrightManager(self.playwright),
         )
         self.playwright_patch.start()
+        self.geoip_patch = patch(
+            "profile_manager.browser_service.maybe_resolve_geoip",
+            return_value=(None, None, None),
+        )
+        self.geoip_patch.start()
         self.service = BrowserService(lambda *event: self.events.append(event))
 
     async def asyncTearDown(self) -> None:
         await self.service.close_all()
         self.playwright_patch.stop()
+        self.geoip_patch.stop()
         self.temp.cleanup()
 
     async def test_open_passes_stable_seed_and_close_cleans_up(self) -> None:
@@ -323,6 +329,61 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(assigned_playwrights[0], assigned_playwrights[1])
         self.assertTrue(all(playwright.stop_calls == 1 for playwright in factory.playwrights))
 
+    async def test_close_timeout_keeps_context_for_retry(self) -> None:
+        context = FakeContext()
+        self.service._contexts[self.profile.id] = context
+        self.service._states[self.profile.id] = RuntimeState.RUNNING
+        self.service._cdp_urls[self.profile.id] = "http://127.0.0.1:9222"
+
+        release = asyncio.Event()
+        original_close = context.close
+
+        async def stuck_close():
+            await release.wait()
+            await original_close()
+
+        with patch.object(context, "close", stuck_close), patch(
+            "profile_manager.browser_service.CLOSE_TIMEOUT", 0.01
+        ):
+            with self.assertRaises(TimeoutError):
+                await self.service.close(self.profile.id)
+
+        self.assertIs(self.service._contexts[self.profile.id], context)
+        self.assertEqual(self.service.state(self.profile.id), RuntimeState.ERROR)
+        with self.assertRaisesRegex(RuntimeError, "đóng"):
+            await self.service.open(self.profile)
+        release.set()
+        await self.service.close(self.profile.id)
+        self.assertTrue(context.closed)
+        self.assertEqual(self.service.state(self.profile.id), RuntimeState.STOPPED)
+
+    async def test_open_applies_resolved_identity_without_blocking_worker(self) -> None:
+        import time
+        context = FakeContext()
+        resolver_started = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def resolve(*_args):
+            loop.call_soon_threadsafe(resolver_started.set)
+            time.sleep(0.05)
+            return "Europe/Berlin", "de-DE", "203.0.113.10"
+
+        async def launch(*_args, **kwargs):
+            self.assertEqual(kwargs["timezone"], "Europe/Berlin")
+            self.assertEqual(kwargs["locale"], "de-DE")
+            self.assertIn("--fingerprint-webrtc-ip=203.0.113.10", kwargs["args"])
+            return context
+
+        with patch("profile_manager.browser_service.maybe_resolve_geoip", resolve), patch(
+            "profile_manager.browser_service.launch_persistent_context_async", launch
+        ), patch(
+            "profile_manager.browser_service.discover_cdp_url", return_value="http://127.0.0.1:9222"
+        ):
+            task = asyncio.create_task(self.service.open(self.profile))
+            await asyncio.wait_for(resolver_started.wait(), 1)
+            self.assertFalse(task.done())
+            await task
+
     async def test_profiles_launch_concurrently(self) -> None:
         second_profile = ProfileConfig(
             id="00000000-0000-0000-0000-000000000002",
@@ -360,6 +421,91 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(*tasks)
 
         self.assertEqual(started, 2)
+
+    async def test_late_close_event_finishes_timed_out_close(self) -> None:
+        context = FakeContext()
+        release = asyncio.Event()
+        original_close = context.close
+
+        async def delayed_close():
+            await release.wait()
+            await original_close()
+
+        with patch("profile_manager.browser_service.launch_persistent_context_async", return_value=context), patch(
+            "profile_manager.browser_service.discover_cdp_url", return_value="http://127.0.0.1:9222"
+        ):
+            await self.service.open(self.profile)
+        with patch.object(context, "close", delayed_close), patch("profile_manager.browser_service.CLOSE_TIMEOUT", 0.01):
+            with self.assertRaises(TimeoutError):
+                await self.service.close(self.profile.id)
+            task = self.service._close_tasks[self.profile.id]
+            release.set()
+            await task
+            await asyncio.sleep(0)
+        self.assertEqual(self.service.state(self.profile.id), RuntimeState.STOPPED)
+        self.assertNotIn(self.profile.id, self.service._contexts)
+        self.assertNotIn(self.profile.id, self.service._close_tasks)
+
+    async def test_failed_open_retains_context_when_cleanup_fails(self) -> None:
+        context = FakeContext()
+        with patch("profile_manager.browser_service.launch_persistent_context_async", return_value=context), patch(
+            "profile_manager.browser_service.discover_cdp_url", side_effect=RuntimeError("discovery failed")
+        ), patch.object(context, "close", side_effect=RuntimeError("close failed")):
+            with self.assertRaisesRegex(RuntimeError, "discovery failed"):
+                await self.service.open(self.profile)
+        self.assertIs(self.service._contexts[self.profile.id], context)
+        self.assertEqual(self.service.state(self.profile.id), RuntimeState.ERROR)
+        with self.assertRaisesRegex(RuntimeError, "đóng"):
+            await self.service.open(self.profile)
+        await self.service.close(self.profile.id)
+        self.assertTrue(context.closed)
+
+    async def test_failed_close_can_be_retried(self) -> None:
+        context = FakeContext()
+        self.service._contexts[self.profile.id] = context
+        self.service._states[self.profile.id] = RuntimeState.RUNNING
+        with patch.object(context, "close", side_effect=RuntimeError("close failed")):
+            with self.assertRaisesRegex(RuntimeError, "close failed"):
+                await self.service.close(self.profile.id)
+        self.assertIs(self.service._contexts[self.profile.id], context)
+        self.assertEqual(self.service.state(self.profile.id), RuntimeState.ERROR)
+        await self.service.close(self.profile.id)
+        self.assertTrue(context.closed)
+
+    async def test_launch_limit_does_not_block_closing_running_profile(self) -> None:
+        from dataclasses import replace
+        release = asyncio.Event()
+        two_started = asyncio.Event()
+        active = peak = 0
+
+        async def launch(*_args, **_kwargs):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            if active == 2:
+                two_started.set()
+            await release.wait()
+            active -= 1
+            return FakeContext()
+
+        profiles = [replace(self.profile, id=str(i), data_dir=str(Path(self.temp.name) / str(i))) for i in range(3)]
+        running = FakeContext()
+        self.service._contexts["running"] = running
+        self.service._states["running"] = RuntimeState.RUNNING
+        with patch("profile_manager.browser_service.launch_persistent_context_async", launch), patch(
+            "profile_manager.browser_service.discover_cdp_url", return_value="http://127.0.0.1:9222"
+        ):
+            tasks = [asyncio.create_task(self.service.open(p)) for p in profiles]
+            try:
+                await asyncio.wait_for(two_started.wait(), 1)
+                await asyncio.sleep(0.02)
+                self.assertEqual(peak, 2)
+                await self.service.close("running")
+                self.assertTrue(running.closed)
+            finally:
+                release.set()
+                await asyncio.gather(*tasks)
+        self.assertEqual(peak, 2)
 
     async def test_pool_resize_requires_all_profiles_stopped(self) -> None:
         context = FakeContext()

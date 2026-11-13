@@ -186,9 +186,21 @@ Error envelope:
 }
 ```
 
-Settings cho phép cấu hình số Playwright instance (`1–20`); các lần launch được
-tuần tự hóa để tránh tăng tải đột ngột. Local API không giới hạn số request/phút;
+Settings cho phép cấu hình số Playwright instance (`1–20`); tối đa hai profile
+được khởi động đồng thời để hạn chế đỉnh CPU/RAM và disk I/O. Các profile còn lại
+chờ lượt; Close không phải chờ hàng đợi Open. Pool Playwright không phải giới hạn
+số Chromium đang chạy. Local API không giới hạn số request/phút;
 giới hạn session thực tế vẫn phụ thuộc license/tier CloakBrowser.
+
+Nếu Close lỗi hoặc quá thời gian chờ, profile giữ trạng thái `Error` và context
+vẫn được theo dõi: dùng Close để thử lại, không Open hoặc xóa dữ liệu khi chưa
+đóng xong. Một thao tác Close đang chạy vẫn tiếp tục sau timeout; sự kiện đóng
+thực tế sẽ cập nhật trạng thái về `Stopped`.
+
+GeoIP được resolve ngoài event loop khi Open; timezone/locale chỉ định rõ vẫn
+được giữ. Dependency được pin vào commit `9337761` trên main của fork CloakBrowser:
+backport phần chuẩn bị launch bất đồng bộ từ upstream, giữ shared Playwright và
+xử lý authenticated HTTP proxy của fork. Không đồng bộ toàn bộ upstream.
 
 ## Dữ liệu
 
