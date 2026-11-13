@@ -49,8 +49,8 @@ class ProfileStoreTests(unittest.TestCase):
         self.assertEqual(settings.api_key, "secret-key")
         self.assertEqual(settings.playwright_instances, 1)
         second = self.store.create_profile("Second")
-        self.assertEqual(Path(first.data_dir).parent, Path(self.temp.name) / "profiles")
-        self.assertEqual(Path(second.data_dir).parent, new_root)
+        self.assertEqual(Path(first.data_dir).parent.resolve(), (Path(self.temp.name) / "profiles").resolve())
+        self.assertEqual(Path(second.data_dir).parent.resolve(), new_root.resolve())
 
     def test_rejects_invalid_proxy(self) -> None:
         with self.assertRaises(ValueError):

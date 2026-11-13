@@ -20,7 +20,9 @@ if ($Version -ne $SourceVersion) {
 }
 
 python -m unittest discover -s tests -v
+if ($LASTEXITCODE -ne 0) { throw "Release tests failed" }
 python -m PyInstaller --noconfirm --clean cloakbrowser-profile-manager.spec
+if ($LASTEXITCODE -ne 0) { throw "Release build failed" }
 
 $PackageName = "CloakBrowser-Profile-Manager-v$Version-win-x64"
 $Stage = Join-Path $Root "dist\$PackageName"
