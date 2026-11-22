@@ -8,6 +8,7 @@ import math
 import os
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from cloakbrowser import __version__ as cloakbrowser_version
@@ -23,6 +24,20 @@ StateCallback = Callable[[str, RuntimeState, str | None], None]
 LAUNCH_TIMEOUT = 60.0
 CLOSE_TIMEOUT = 15.0
 
+@dataclass(frozen=True, slots=True)
+class NetworkLimits:
+    download_mbps: int
+    upload_mbps: int
+
+    def cdp_params(self) -> dict[str, int | bool]:
+        return {
+            "offline": False,
+            "latency": 0,
+            "downloadThroughput": self.download_mbps * 1_000_000 // 8,
+            "uploadThroughput": self.upload_mbps * 1_000_000 // 8,
+        }
+
+NETWORK_LIMITS = NetworkLimits(download_mbps=10, upload_mbps=5)
 
 def install_dialog_handler(page: Any) -> None:
     """Accept browser dialogs, ignoring only Playwright's stale-dialog race."""
@@ -128,6 +143,7 @@ class BrowserService:
             if self.state(profile.id) == RuntimeState.RUNNING and existing:
                 context = self._contexts.get(profile.id)
                 if context is not None:
+                    await self._apply_network_limits_to_pages(context)
                     await self._apply_open_options(context, options)
                 return existing
             if self._draining:
@@ -207,13 +223,22 @@ class BrowserService:
                     self._handle_context_closed(profile.id, generation, context)
                 ),
             )
-            context.on("page", install_dialog_handler)
+            async def on_page(page: Any) -> None:
+                install_dialog_handler(page)
+                try:
+                    await self._apply_network_limits(context, page)
+                except Exception:
+                    if not page.is_closed():
+                        raise
+
+            context.on("page", on_page)
             for page in context.pages:
                 install_dialog_handler(page)
             cdp_url = await discover_cdp_url(profile.user_data_dir, started_at)
             self._cdp_urls[profile.id] = cdp_url
             if not context.pages:
                 await context.new_page()
+            await self._apply_network_limits_to_pages(context)
             await self._apply_open_options(context, options)
             self._set_state(profile.id, RuntimeState.RUNNING)
             return cdp_url
@@ -296,6 +321,19 @@ class BrowserService:
             for lock in reversed(locks):
                 lock.release()
             raise
+
+    async def _apply_network_limits_to_pages(self, context: Any) -> None:
+        for page in context.pages:
+            await self._apply_network_limits(context, page)
+
+    async def _apply_network_limits(self, context: Any, page: Any) -> None:
+        session = await context.new_cdp_session(page)
+        try:
+            await session.send(
+                "Network.emulateNetworkConditions", NETWORK_LIMITS.cdp_params()
+            )
+        finally:
+            await session.detach()
 
     async def _apply_open_options(self, context: Any, options: OpenOptions) -> None:
         if context.pages and (

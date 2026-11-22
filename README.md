@@ -46,6 +46,7 @@ Dependency CloakBrowser được pin vào commit bất biến trong `requirement
 - Sửa tên và proxy HTTP/HTTPS/SOCKS5.
 - Xóa toàn bộ metadata, cookie, cache và history sau khi xác nhận.
 - Open/Close nhiều profile độc lập với lock theo profile, launch queue và giới hạn tài nguyên.
+- Mọi trang của profile được giới hạn cố định 10 Mbps tải xuống và 5 Mbps tải lên qua CDP; gọi Open lại áp dụng lại giới hạn.
 - Chọn thư mục mặc định cho profile tạo mới trong Settings.
 - Tự cập nhật trạng thái khi cửa sổ Chromium được đóng thủ công.
 - SQLite/WAL cho metadata, tự migration một lần từ `profiles.json` cũ.

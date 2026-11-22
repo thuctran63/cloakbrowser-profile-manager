@@ -28,14 +28,16 @@ class FakeContext:
             handler(self)
 
     async def new_cdp_session(self, page):
-        return FakeCdpSession()
+        return FakeCdpSession(page)
 
     async def new_page(self):
         page = FakePage()
         self.pages.append(page)
         handler = self.handlers.get("page")
         if handler:
-            handler(page)
+            result = handler(page)
+            if asyncio.iscoroutine(result):
+                await result
         return page
 
     async def add_init_script(self, script):
@@ -50,8 +52,13 @@ class DriverClosedContext(FakeContext):
 class FakeCdpSession:
     calls = []
 
+    def __init__(self, page):
+        self.page = page
+
     async def send(self, method, params=None):
         self.calls.append((method, params))
+        if method == "Network.emulateNetworkConditions":
+            self.page.network_conditions = params
         if method == "Browser.getWindowForTarget":
             return {"windowId": 42}
         return {}
@@ -175,6 +182,33 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(context.closed)
         self.assertIsNone(self.service.cdp_url(self.profile.id))
         self.assertEqual(self.service.state(self.profile.id), RuntimeState.STOPPED)
+
+    async def test_open_limits_existing_and_future_pages_and_reapplies_on_repeat(self) -> None:
+        context = FakeContext()
+        context.pages.append(FakePage())
+        expected = {
+            "offline": False,
+            "latency": 0,
+            "downloadThroughput": 1_250_000,
+            "uploadThroughput": 625_000,
+        }
+        with patch(
+            "profile_manager.browser_service.launch_persistent_context_async", return_value=context
+        ) as launch, patch(
+            "profile_manager.browser_service.discover_cdp_url", return_value="http://127.0.0.1:9222"
+        ):
+            await self.service.open(self.profile)
+            for page in context.pages:
+                self.assertEqual(page.network_conditions, expected)
+            later = await context.new_page()
+            self.assertEqual(later.network_conditions, expected)
+            self.assertIn("dialog", later.handlers)
+            for page in context.pages:
+                page.network_conditions = None
+            await self.service.open(self.profile)
+            for page in context.pages:
+                self.assertEqual(page.network_conditions, expected)
+            launch.assert_called_once()
 
     async def test_dialog_handler_is_installed_on_every_new_page(self) -> None:
         context = FakeContext()
