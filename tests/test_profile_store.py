@@ -93,6 +93,43 @@ class ProfileStoreTests(unittest.TestCase):
         self.assertEqual(len(self.store.list_profiles()), 12)
         self.assertTrue(self.store.ping())
 
+    def test_reclaim_restores_tombstone_when_row_survives(self) -> None:
+        profile = self.store.create_profile("Interrupted")
+        profile_dir = Path(profile.data_dir)
+        tombstone = profile_dir.with_name(f".{profile_dir.name}.deleting")
+        profile_dir.replace(tombstone)
+
+        reopened = ProfileStore(Path(self.temp.name) / "app", Path(self.temp.name) / "profiles")
+        self.assertTrue(profile_dir.is_dir())
+        self.assertFalse(tombstone.exists())
+        self.assertEqual(reopened.get_profile(profile.id).data_dir, str(profile_dir))
+
+    def test_reclaim_removes_tombstone_without_row(self) -> None:
+        profile = self.store.create_profile("Deleted")
+        profile_dir = Path(profile.data_dir)
+        tombstone = profile_dir.with_name(f".{profile_dir.name}.deleting")
+        profile_dir.replace(tombstone)
+        with closing(sqlite3.connect(self.store.database_path)) as connection:
+            connection.execute("DELETE FROM profiles WHERE id = ?", (profile.id,))
+            connection.commit()
+
+        ProfileStore(Path(self.temp.name) / "app", Path(self.temp.name) / "profiles")
+        self.assertFalse(tombstone.exists())
+        self.assertFalse(profile_dir.exists())
+
+    def test_reclaim_is_idempotent(self) -> None:
+        profile = self.store.create_profile("Stable")
+        profile_dir = Path(profile.data_dir)
+        (profile_dir / "user-data" / "marker.txt").write_text("keep", encoding="utf-8")
+        app_dir = Path(self.temp.name) / "app"
+
+        for _ in range(3):
+            ProfileStore(app_dir, Path(self.temp.name) / "profiles")
+            self.assertEqual(
+                (profile_dir / "user-data" / "marker.txt").read_text(encoding="utf-8"), "keep"
+            )
+        self.assertEqual(len(self.store.list_profiles()), 1)
+
     def test_migrates_legacy_json_once(self) -> None:
         profile = self.store.create_profile("Legacy")
         data = [profile.to_dict()]

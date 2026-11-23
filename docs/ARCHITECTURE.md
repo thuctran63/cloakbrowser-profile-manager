@@ -1,6 +1,6 @@
 # Kiến trúc CloakBrowser Profile Manager
 
-> Tài liệu này mô tả **source hiện tại** của ứng dụng desktop và bản release `v0.3.5`. Đây không phải kiến trúc mục tiêu trong tương lai.
+> Tài liệu này mô tả **source hiện tại** của ứng dụng desktop và bản release `v0.3.11`. Đây không phải kiến trúc mục tiêu trong tương lai.
 
 ## 1. Bức tranh tổng thể
 
@@ -53,7 +53,6 @@ flowchart LR
 | `profile_manager/browser_service.py` | Nguồn sự thật runtime cho context, state, CDP URL, generation, Playwright pool và lifecycle. |
 | `profile_manager/devtools.py` | Khám phá `DevToolsActivePort`; kiểm tra `/json/version` và cached CDP endpoint. |
 | `profile_manager/api_server.py` | HTTP API local, authentication, CRUD, health, diagnostics, preflight và lifecycle operations. |
-| `profile_manager/operations.py` | Trạng thái in-memory của operation open/close do API tạo. |
 | `profile_manager/extensions.py` | Import, content-addressed storage và assignment extension theo profile. |
 | `profile_manager/proxy.py` | Validate/normalize proxy và che credential trong UI/lỗi. |
 | `cloakbrowser/cloakbrowser/browser.py` | Chuẩn bị binary/proxy/GeoIP/license/Widevine/flags và gọi Playwright launch. |
@@ -81,12 +80,12 @@ flowchart LR
 
 ### 3.3 Synchronization
 
-- `BrowserService._locks[profile_id]`: serialize lifecycle của cùng profile.
-- `_launch_tasks`: một canonical launch task cho mỗi profile; nhiều caller cùng chờ một task.
-- `_launch_slots = asyncio.Semaphore(1)`: launch browser toàn cục hiện được tuần tự hóa.
+- `BrowserService._locks[profile_id]`: serialize lifecycle của cùng profile. Nhiều caller mở cùng profile xếp hàng trên lock này.
+- `BrowserService._pending_opens` với `MAX_PENDING_OPENS = 24`: chặn số launch đang chờ, vượt ngưỡng thì raise `LaunchBusyError`.
+- `_launch_slots = asyncio.Semaphore(2)`: giới hạn số launch Chromium chạy song song toàn cục. Đây là hàng đợi hữu hạn thật sự cho tài nguyên nặng.
 - `_playwright_locks[slot]`: bảo vệ lazy start/stop từng Playwright instance.
 - `_generation`: ngăn callback context cũ xóa runtime của browser vừa mở lại.
-- `_snapshot_lock`: snapshot nhất quán cho state và CDP URL giữa worker/API threads.
+- `_close_tasks[profile_id]`: giữ close task đang chạy để lần `close()` sau chờ chung một task thay vì đóng hai lần.
 - `AsyncWorker._state_lock`: serialize submit với shutdown; coroutine bị từ chối được đóng.
 - SQLite mở connection theo operation, dùng WAL, foreign keys và busy timeout.
 
@@ -105,8 +104,7 @@ sequenceDiagram
     Worker->>Service: open()
     Service->>Service: reconcile cached RUNNING/CDP
     Service->>Service: lấy per-profile lock
-    Service->>Service: reuse hoặc tạo canonical launch task
-    Service->>Service: state = STARTING
+    Service->>Service: xếp hàng vào launch slot, publish state = STARTING
     Service->>Prep: mkdir, Preferences, xóa stale DevToolsActivePort
     Prep-->>Service: prepared
     Service->>Prep: binary + GeoIP + proxy + license + Widevine
@@ -126,7 +124,7 @@ sequenceDiagram
 1. `open()` gọi reconciliation nếu runtime đang cho rằng profile là `RUNNING`.
 2. Cached CDP được kiểm tra off-loop. Nếu chết, state cũ chỉ bị xóa khi generation, context và URL vẫn khớp snapshot.
 3. Nếu browser vẫn khỏe, service áp lại geometry cần thiết và trả URL hiện tại.
-4. Nếu cần launch, service tạo đúng một `_launch_task`; caller dùng `asyncio.shield()` để cancellation của một caller không hủy launch dùng chung.
+4. Nếu cần launch, service lấy per-profile lock và giành một slot trong `_launch_slots`, nên hai caller cùng profile không launch song song và tổng số launch đồng thời bị chặn ở 2. Blocking preparation chạy trong executor thread nên không bị cancellation của caller hủy giữa chừng.
 5. Filesystem preparation và CloakBrowser synchronous preparation chạy trong executor thread.
 6. Playwright protocol call chạy trên worker loop, có tổng timeout `LAUNCH_TIMEOUT = 60s`.
 7. `DevToolsActivePort` phải mới hơn thời điểm launch; `/json/version` phải trả WebSocket endpoint đúng port.
@@ -147,7 +145,7 @@ Mỗi profile có:
 ### Close chủ động
 
 1. `close(profile_id)` lấy per-profile lock.
-2. Nếu launch đang chạy, tăng generation và cancel canonical launch task.
+2. Nếu launch đang chạy, lấy per-profile lock và chờ launch nhả lock đó.
 3. Chờ launch cleanup hoàn tất.
 4. Gọi `context.close()` với `CLOSE_TIMEOUT = 15s`.
 5. Dọn context, CDP URL, Playwright slot assignment và chuyển `STOPPED`.
@@ -172,7 +170,7 @@ Nếu event chưa đến nhưng cached CDP đã chết, lần `open()` kế ti�
 - Nhiều browser contexts có thể dùng chung một Playwright driver.
 - Pool giảm overhead so với một driver cho mỗi profile.
 - Đây **không phải** hard limit số browser.
-- Launch hiện vẫn serialize bằng semaphore 1 để giảm contention lúc startup.
+- Launch được chặn ở `asyncio.Semaphore(2)` để giới hạn contention lúc startup, không phải để tuần tự hóa hoàn toàn.
 
 ```mermaid
 flowchart TD
@@ -211,7 +209,6 @@ Mỗi HTTP request có thread riêng nên một launch không khóa API server. 
     └── .trash/
 
 profiles/{profile-id}/
-├── profile.json
 └── user-data/
     ├── Default/Preferences
     ├── DevToolsActivePort   # chỉ khi browser chạy
@@ -222,7 +219,6 @@ profiles/{profile-id}/
 
 - SQLite: profile metadata và extension assignments.
 - `settings.json`: API host/port/key, profile root và Playwright pool size.
-- `profile.json`: metadata phụ cạnh profile.
 - `user-data`: cookies, cache, local storage, history và Chromium preferences.
 - Extension payloads: lưu content-addressed để tránh duplicate.
 
@@ -242,8 +238,10 @@ Sau process restart, ứng dụng không attach lại browser cũ; runtime mặc
 | Launch treo | Timeout 60 giây, cancellation-safe cleanup. |
 | Close treo | Timeout 15 giây, state `ERROR`. |
 | Playwright stop treo | Timeout 15 giây. |
-| Nhiều open cùng profile | Canonical launch task. |
-| Close trong lúc launch | Cancel launch task và cleanup. |
+| Nhiều open cùng profile | Per-profile `_locks[profile_id]`; caller sau chờ và tái dùng context đã có. |
+| Quá nhiều launch cùng lúc | `_pending_opens` chặn ở `MAX_PENDING_OPENS = 24`, vượt ngưỡng raise `LaunchBusyError`; `_launch_slots` chặn ở 2 launch song song. |
+| Close trong lúc launch | Close chờ per-profile lock, sau đó đóng context đã publish. |
+| Crash giữa delete profile | `delete_profile` đổi tên thư mục sang tombstone trước khi xóa row; `_reclaim_abandoned_deletes()` lúc khởi động khôi phục tombstone còn row và dọn tombstone mồ côi. |
 | Stale context callback | Generation + identity check. |
 | Cached CDP chết | Probe off-loop và conditional reconciliation trước reuse. |
 | Worker submit/shutdown race | Lock-protected stopping state; rejected coroutine được đóng. |
@@ -278,7 +276,7 @@ Sau process restart, ứng dụng không attach lại browser cũ; runtime mặc
 ```mermaid
 flowchart LR
     Source[Source workspace] --> Deps[requirements-build.txt]
-    Deps --> Tests[39 release tests]
+    Deps --> Tests[57 release tests]
     Tests --> PI[PyInstaller one-file EXE]
     PI --> Check[Dependency warning checks]
     Check --> Stage[EXE + docs + empty binaries/profiles]
@@ -301,7 +299,7 @@ flowchart LR
 2. Không persist PID/process handle và không attach lại Chromium sau app restart.
 3. Không có periodic health polling; CDP reconciliation hiện chạy khi tái `open()`.
 4. Close timeout chưa có fallback `terminate -> kill` bằng process handle.
-5. Shared Playwright slot chưa tự restart khi driver process chết.
+5. `_invalidate_playwright_slot()` chỉ restart slot khi một lifecycle call phát hiện driver transport đã chết; chưa có detector chủ động. Không có periodic health polling, xem mục 3.
 6. API chưa trả browser PID vì Playwright persistent context không expose process handle công khai.
 7. Readiness hiện chưa chứng minh event-loop responsiveness bằng heartbeat có deadline.
 8. Proxy credential và API key đang lưu plain text local.
@@ -312,9 +310,7 @@ flowchart LR
 Ưu tiên theo chi phí thấp đến cao:
 
 1. Worker heartbeat cho readiness.
-2. Playwright slot restart khi driver transport chết.
-3. Invalidate/restart Playwright slot khi transport chết.
-4. Theo dõi process handle để close timeout có terminate/kill fallback.
-5. Chỉ chuyển sang process-per-profile khi telemetry chứng minh shared worker/driver vẫn tạo blast radius không chấp nhận được.
+2. Theo dõi process handle để close timeout có terminate/kill fallback.
+3. Chỉ chuyển sang process-per-profile khi telemetry chứng minh shared worker/driver vẫn tạo blast radius không chấp nhận được.
 
 Không cần checkpointing, distributed queue hoặc orchestration service cho mô hình desktop local hiện tại.

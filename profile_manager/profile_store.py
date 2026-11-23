@@ -23,6 +23,8 @@ class ProfileStore:
         "id, name, proxy, fingerprint_seed, data_dir, created_at, updated_at, "
         "geoip, timezone, locale, release_channel, browser_version, humanize, human_preset"
     )
+    _TOMBSTONE_SUFFIX = ".deleting"
+
     def __init__(self, app_data_dir: Path, default_profiles_dir: Path) -> None:
         self.app_data_dir = app_data_dir.resolve()
         self.default_profiles_dir = default_profiles_dir.resolve()
@@ -33,6 +35,7 @@ class ProfileStore:
         self._settings_lock = threading.RLock()
         self.app_data_dir.mkdir(parents=True, exist_ok=True)
         self._initialize_database()
+        self._reclaim_abandoned_deletes()
 
     def _read_json(self, path: Path, default: Any) -> Any:
         if not path.exists():
@@ -59,6 +62,11 @@ class ProfileStore:
                 Path(temp_name).unlink(missing_ok=True)
 
     def load_settings(self) -> AppSettings:
+        """Return the stored settings, minting the API key on first load.
+
+        The minted key is written back so it survives a restart. Without that, every start
+        would rotate the key and break clients that already hold it.
+        """
         with self._settings_lock:
             data = self._read_json(self.settings_path, {})
             settings = AppSettings.from_dict(data, self.default_profiles_dir)
@@ -90,15 +98,6 @@ class ProfileStore:
             ).fetchall()
         return [self._profile_from_row(row) for row in rows]
 
-    def _save_profiles(self, profiles: list[ProfileConfig]) -> None:
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute("DELETE FROM profiles")
-            connection.executemany(
-                f"INSERT INTO profiles ({self._PROFILE_COLUMNS}) VALUES ({','.join('?' for _ in range(14))})",
-                [self._profile_values(profile) for profile in profiles],
-            )
-
     def create_profile(
         self, name: str, proxy: str = "", settings: ProfileSettings | None = None
     ) -> ProfileConfig:
@@ -128,7 +127,6 @@ class ProfileStore:
             human_preset=identity.human_preset,
         )
         try:
-            self._atomic_write(profile_dir / "profile.json", profile.to_dict())
             with self._connect() as connection:
                 connection.execute(
                     f"INSERT INTO profiles ({self._PROFILE_COLUMNS}) VALUES ({','.join('?' for _ in range(14))})",
@@ -157,7 +155,6 @@ class ProfileStore:
             for field in ("geoip", "timezone", "locale", "release_channel", "browser_version", "humanize", "human_preset"):
                 setattr(profile, field, getattr(settings, field))
         profile.updated_at = datetime.now(timezone.utc).isoformat()
-        self._atomic_write(Path(profile.data_dir) / "profile.json", profile.to_dict())
         with self._connect() as connection:
             connection.execute(
                 "UPDATE profiles SET name=?, proxy=?, updated_at=?, geoip=?, timezone=?, locale=?, "
@@ -173,16 +170,52 @@ class ProfileStore:
         profile_dir = Path(profile.data_dir).resolve()
         if profile_dir == profile_dir.anchor or len(profile_dir.parts) < 3:
             raise RuntimeError("Từ chối xóa đường dẫn profile không an toàn")
-        tombstone = profile_dir.with_name(f".{profile_dir.name}.deleting")
+        tombstone = profile_dir.with_name(f".{profile_dir.name}{self._TOMBSTONE_SUFFIX}")
         profile_dir.replace(tombstone)
         try:
             with self._connect() as connection:
                 connection.execute("DELETE FROM profiles WHERE id = ?", (profile.id,))
-            shutil.rmtree(tombstone)
         except Exception:
             if tombstone.exists() and not profile_dir.exists():
                 tombstone.replace(profile_dir)
             raise
+        shutil.rmtree(tombstone, ignore_errors=True)
+
+    def _reclaim_abandoned_deletes(self) -> None:
+        """Converge the profile directory after a delete that crashed mid-way.
+
+        ``delete_profile`` renames the data directory to a ``.<id>.deleting`` tombstone and
+        only then removes the row. A surviving row means the delete never committed, so the
+        tombstone is the live data and goes back. A missing row means it committed, so the
+        tombstone is leftover and goes away.
+        """
+        try:
+            with self._connect() as connection:
+                rows = connection.execute("SELECT data_dir FROM profiles").fetchall()
+        except sqlite3.Error:
+            return
+        live = {Path(row["data_dir"]).resolve() for row in rows}
+        for root in {path.parent for path in live} | {self.default_profiles_dir}:
+            if root == root.anchor or len(root.parts) < 3:
+                continue
+            self._reclaim_root(root, live)
+
+    def _reclaim_root(self, root: Path, live: set[Path]) -> None:
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            if not entry.name.startswith(".") or not entry.name.endswith(self._TOMBSTONE_SUFFIX):
+                continue
+            original = entry.with_name(entry.name[1 : -len(self._TOMBSTONE_SUFFIX)])
+            try:
+                if original in live:
+                    entry.replace(original)
+                else:
+                    shutil.rmtree(entry, ignore_errors=True)
+            except OSError:
+                continue
 
     def get_profile(self, profile_id: str) -> ProfileConfig:
         try:
@@ -288,17 +321,6 @@ class ProfileStore:
             profile.timezone, profile.locale, profile.release_channel,
             profile.browser_version, int(profile.humanize), profile.human_preset,
         )
-
-    @staticmethod
-    def _find(profiles: list[ProfileConfig], profile_id: str) -> ProfileConfig:
-        try:
-            expected = str(uuid.UUID(profile_id))
-        except ValueError as exc:
-            raise KeyError("Profile ID không hợp lệ") from exc
-        for profile in profiles:
-            if profile.id == expected:
-                return profile
-        raise KeyError("Không tìm thấy profile")
 
     @staticmethod
     def _validate_name(name: str) -> str:
