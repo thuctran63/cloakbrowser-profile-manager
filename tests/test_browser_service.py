@@ -144,6 +144,48 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
         self.geoip_patch.stop()
         self.temp.cleanup()
 
+    async def test_deadline_includes_lifecycle_lock_and_queue_rejects_overflow(self) -> None:
+        from profile_manager.browser_service import LaunchBusyError
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def hold():
+            async with self.service._lock(self.profile.id):
+                entered.set()
+                await release.wait()
+
+        holder = asyncio.create_task(hold())
+        await entered.wait()
+        try:
+            with patch("profile_manager.browser_service.MAX_PENDING_OPENS", 1), patch(
+                "profile_manager.browser_service.LAUNCH_TIMEOUT", 0.1,
+            ):
+                pending = asyncio.create_task(self.service.open(self.profile))
+                await asyncio.sleep(0)
+                with self.assertRaises(LaunchBusyError):
+                    await self.service.open(self.profile)
+                with self.assertRaisesRegex(TimeoutError, "deadline exceeded"):
+                    await pending
+                self.assertEqual(self.service.state(self.profile.id), RuntimeState.STOPPED)
+        finally:
+            release.set()
+            await holder
+
+    async def test_cdp_deadline_closes_started_context(self) -> None:
+        context = FakeContext()
+
+        async def unready(*args):
+            await asyncio.Event().wait()
+
+        with patch("profile_manager.browser_service.launch_persistent_context_async", return_value=context), patch(
+            "profile_manager.browser_service.discover_cdp_url", side_effect=unready,
+        ), patch("profile_manager.browser_service.LAUNCH_TIMEOUT", 0.2):
+            with self.assertRaisesRegex(TimeoutError, "deadline exceeded"):
+                await self.service.open(self.profile)
+        self.assertIsNone(self.service.cdp_url(self.profile.id))
+        self.assertEqual(self.service.state(self.profile.id), RuntimeState.STOPPED)
+
     async def test_open_passes_stable_seed_and_close_cleans_up(self) -> None:
         context = FakeContext()
 
@@ -652,6 +694,47 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
             ),
             FakeCdpSession.calls,
         )
+
+
+    async def test_repeated_cancellation_keeps_mutation_serialized(self):
+        from threading import Event
+
+        service = BrowserService(lambda *_: None)
+        loop = asyncio.get_running_loop()
+        started = asyncio.Event()
+        release = Event()
+        finished = Event()
+        attempting = asyncio.Event()
+
+        def write():
+            loop.call_soon_threadsafe(started.set)
+            if not release.wait(5):
+                raise TimeoutError("Test did not release the write")
+            finished.set()
+
+        async def compete():
+            attempting.set()
+            return await service.mutate_profile("same", finished.is_set)
+
+        mutation = asyncio.create_task(service.mutate_profile("same", write))
+        competitor = None
+        try:
+            await asyncio.wait_for(started.wait(), 5)
+            competitor = asyncio.create_task(compete())
+            await asyncio.wait_for(attempting.wait(), 5)
+            for _ in range(2):
+                self.assertTrue(mutation.cancel())
+                await asyncio.sleep(0)
+            for _ in range(4):
+                await asyncio.sleep(0)
+            self.assertFalse(mutation.done(), "Cancellation escaped while the thread was writing")
+            self.assertFalse(competitor.done())
+        finally:
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(mutation, 5)
+            if competitor is not None:
+                self.assertTrue(await asyncio.wait_for(competitor, 5))
 
 
 if __name__ == "__main__":

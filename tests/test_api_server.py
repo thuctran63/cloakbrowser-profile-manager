@@ -112,11 +112,11 @@ class ProfileApiServerTests(unittest.TestCase):
 
         received_options = []
 
-        async def open_profile(_profile, options):
+        async def open_profile(_store, _profile_id, options):
             received_options.append(options)
             return "http://127.0.0.1:9222"
 
-        self.service.open = open_profile
+        self.service.open_stored = open_profile
         with patch(
             "profile_manager.api_server.get_cdp_websocket_url",
             return_value="ws://127.0.0.1:9222/devtools/browser/test",

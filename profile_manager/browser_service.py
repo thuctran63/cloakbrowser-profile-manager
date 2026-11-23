@@ -23,6 +23,11 @@ from .proxy import redact_proxy_in_text
 StateCallback = Callable[[str, RuntimeState, str | None], None]
 LAUNCH_TIMEOUT = 60.0
 CLOSE_TIMEOUT = 15.0
+MAX_PENDING_OPENS = 24
+
+
+class LaunchBusyError(RuntimeError):
+    pass
 
 @dataclass(frozen=True, slots=True)
 class NetworkLimits:
@@ -76,6 +81,7 @@ class BrowserService:
         self._closing: set[str] = set()
         self._close_tasks: dict[str, asyncio.Task[Any]] = {}
         self._launch_slots = asyncio.Semaphore(2)
+        self._pending_opens = 0
         self._locks: dict[str, asyncio.Lock] = {}
         self._generation: dict[str, int] = {}
         self._extension_library = extension_library
@@ -137,42 +143,90 @@ class BrowserService:
     async def open(
         self, profile: ProfileConfig, options: OpenOptions | None = None
     ) -> str:
-        options = options or OpenOptions()
-        async with self._lock(profile.id):
-            existing = self.cdp_url(profile.id)
-            if self.state(profile.id) == RuntimeState.RUNNING and existing:
-                context = self._contexts.get(profile.id)
-                if context is not None:
-                    await self._apply_network_limits_to_pages(context)
-                    await self._apply_open_options(context, options)
-                return existing
-            if self._draining:
-                raise RuntimeError("Dịch vụ đang shutdown")
-            if profile.id in self._contexts:
-                raise RuntimeError("Hãy đóng profile lỗi trước khi mở lại")
-            self._set_state(profile.id, RuntimeState.STARTING)
-            try:
-                async with self._launch_slots:
-                    if self._draining:
-                        raise RuntimeError("Dịch vụ đang shutdown")
-                    return await self._open_locked(profile, options)
-            finally:
-                if self.state(profile.id) == RuntimeState.STARTING:
-                    self._set_state(profile.id, RuntimeState.STOPPED)
+        return await self._admit_open(profile.id, lambda: profile, options)
+
+    async def open_stored(self, store: Any, profile_id: str, options: OpenOptions | None = None) -> str:
+        return await self._admit_open(profile_id, lambda: store.get_profile(profile_id), options)
+
+    async def mutate_profile(self, profile_id: str, operation: Callable[[], Any], *, stopped: bool = False) -> Any:
+        async with self._lock(profile_id):
+            if stopped and self.state(profile_id) != RuntimeState.STOPPED:
+                raise ValueError("Close the profile before changing it")
+            return await self._prepare_off_loop(operation)
+
+    @staticmethod
+    async def _prepare_off_loop(operation: Callable[[], Any]) -> Any:
+        task = asyncio.create_task(asyncio.to_thread(operation))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Do not release the lifecycle lock while a filesystem write is still active.
+            completion = asyncio.gather(task, return_exceptions=True)
+            while not completion.done():
+                try:
+                    await asyncio.shield(completion)
+                except asyncio.CancelledError:
+                    continue
+            raise
+
+    async def _admit_open(self, profile_id: str, load: Callable[[], ProfileConfig], options: OpenOptions | None) -> str:
+        if self._pending_opens >= MAX_PENDING_OPENS:
+            raise LaunchBusyError("Browser launch queue is full; retry later")
+        self._pending_opens += 1
+        deadline = asyncio.timeout(LAUNCH_TIMEOUT)
+        try:
+            async with deadline:
+                async with self._lock(profile_id):
+                    profile = await asyncio.to_thread(load)
+                    return await self._open_admitted(profile, options or OpenOptions())
+        except TimeoutError as exc:
+            if deadline.expired():
+                raise TimeoutError("Browser open deadline exceeded") from exc
+            raise
+        finally:
+            self._pending_opens -= 1
+
+    async def _open_admitted(self, profile: ProfileConfig, options: OpenOptions) -> str:
+        existing = self.cdp_url(profile.id)
+        if self.state(profile.id) == RuntimeState.RUNNING and existing:
+            context = self._contexts.get(profile.id)
+            if context is not None:
+                await self._apply_network_limits_to_pages(context)
+                await self._apply_open_options(context, options)
+            return existing
+        if self._draining:
+            raise RuntimeError("Dịch vụ đang shutdown")
+        if profile.id in self._contexts:
+            raise RuntimeError("Hãy đóng profile lỗi trước khi mở lại")
+        self._set_state(profile.id, RuntimeState.STARTING)
+        try:
+            async with self._launch_slots:
+                if self._draining:
+                    raise RuntimeError("Dịch vụ đang shutdown")
+                return await self._open_locked(profile, options)
+        finally:
+            if self.state(profile.id) == RuntimeState.STARTING:
+                self._set_state(profile.id, RuntimeState.STOPPED)
 
     async def _open_locked(self, profile: ProfileConfig, options: OpenOptions) -> str:
         context: Any | None = None
+        driver: Any | None = None
         generation = self._generation.get(profile.id, 0) + 1
         self._generation[profile.id] = generation
 
         self._set_state(profile.id, RuntimeState.STARTING)
         try:
-            profile.user_data_dir.mkdir(parents=True, exist_ok=True)
-            if options.page_zoom is not None:
-                self._write_native_page_zoom(profile.user_data_dir, options.page_zoom)
-            active_port = profile.user_data_dir / "DevToolsActivePort"
-            active_port.unlink(missing_ok=True)
-            started_at = time.time()
+            def prepare() -> tuple[float, list[str]]:
+                profile.user_data_dir.mkdir(parents=True, exist_ok=True)
+                if options.page_zoom is not None:
+                    self._write_native_page_zoom(profile.user_data_dir, options.page_zoom)
+                active_port = profile.user_data_dir / "DevToolsActivePort"
+                active_port.unlink(missing_ok=True)
+                started_at = time.time()
+                paths = self._extension_library.launch_paths(profile.id) if self._extension_library else []
+                return started_at, [str(path) for path in paths]
+
+            started_at, extension_paths = await self._prepare_off_loop(prepare)
             launch_args = [
                 f"--fingerprint={profile.fingerprint_seed}",
                 "--fingerprint-platform=windows",
@@ -187,34 +241,30 @@ class BrowserService:
                 launch_args.append(f"--window-size={options.width},{options.height}")
             if options.start_url is not None:
                 launch_args.append(f"--app={options.start_url}")
-            extension_paths = (
-                [str(path) for path in self._extension_library.launch_paths(profile.id)]
-                if self._extension_library else []
+            timezone, locale, exit_ip = await asyncio.to_thread(
+                maybe_resolve_geoip, profile.geoip, profile.proxy,
+                profile.timezone, profile.locale, launch_args,
             )
-            async with asyncio.timeout(LAUNCH_TIMEOUT):
-                timezone, locale, exit_ip = await asyncio.to_thread(
-                    maybe_resolve_geoip, profile.geoip, profile.proxy,
-                    profile.timezone, profile.locale, launch_args,
-                )
-                if exit_ip:
-                    launch_args.append(f"--fingerprint-webrtc-ip={exit_ip}")
-                context = await launch_persistent_context_async(
-                    profile.user_data_dir,
-                    headless=False,
-                    proxy=profile.proxy,
-                    stealth_args=False,
-                    args=launch_args,
-                    extension_paths=extension_paths or None,
-                    geoip=False,
-                    timezone=timezone,
-                    locale=locale,
-                    browser_version=profile.browser_version,
-                    release_channel=profile.release_channel,
-                    humanize=profile.humanize,
-                    human_preset=profile.human_preset,
-                    chromium_sandbox=True,
-                    playwright=await self._get_playwright(profile.id),
-                )
+            if exit_ip:
+                launch_args.append(f"--fingerprint-webrtc-ip={exit_ip}")
+            driver = await self._get_playwright(profile.id)
+            context = await launch_persistent_context_async(
+                profile.user_data_dir,
+                headless=False,
+                proxy=profile.proxy,
+                stealth_args=False,
+                args=launch_args,
+                extension_paths=extension_paths or None,
+                geoip=False,
+                timezone=timezone,
+                locale=locale,
+                browser_version=profile.browser_version,
+                release_channel=profile.release_channel,
+                humanize=profile.humanize,
+                human_preset=profile.human_preset,
+                chromium_sandbox=True,
+                playwright=driver,
+            )
             self._contexts[profile.id] = context
             assert context is not None
             context.on(
@@ -243,7 +293,10 @@ class BrowserService:
             self._set_state(profile.id, RuntimeState.RUNNING)
             return cdp_url
         except BaseException as exc:
-            if context is not None:
+            slot = self._profile_slots.get(profile.id)
+            if driver is not None and slot is not None and _is_driver_connection_closed(exc):
+                await self._invalidate_playwright_slot(slot, driver)
+            elif context is not None:
                 self._contexts[profile.id] = context
                 try:
                     await self._close_locked(profile.id)
@@ -406,6 +459,7 @@ class BrowserService:
         self._closing.add(profile_id)
         self._set_state(profile_id, RuntimeState.STOPPING)
         slot = self._profile_slots.get(profile_id)
+        driver = self._playwrights[slot] if slot is not None else None
         task = self._close_tasks.get(profile_id)
         if task is None:
             task = asyncio.create_task(context.close())
@@ -417,7 +471,7 @@ class BrowserService:
                 await asyncio.shield(task)
         except BaseException as exc:
             if isinstance(exc, Exception) and _is_driver_connection_closed(exc) and slot is not None:
-                await self._invalidate_playwright_slot(slot)
+                await self._invalidate_playwright_slot(slot, driver)
                 return
             if task.done():
                 self._close_tasks.pop(profile_id, None)
@@ -432,9 +486,11 @@ class BrowserService:
         finally:
             self._closing.discard(profile_id)
 
-    async def _invalidate_playwright_slot(self, slot: int) -> None:
+    async def _invalidate_playwright_slot(self, slot: int, expected: Any) -> None:
         """Forget a dead driver and all contexts controlled by it."""
         async with self._playwright_locks[slot]:
+            if self._playwrights[slot] is not expected:
+                return
             playwright, self._playwrights[slot] = self._playwrights[slot], None
             if playwright is not None:
                 try:
@@ -442,20 +498,20 @@ class BrowserService:
                         await playwright.stop()
                 except Exception:
                     pass
-        affected = [
-            profile_id
-            for profile_id, assigned_slot in self._profile_slots.items()
-            if assigned_slot == slot
-        ]
-        for profile_id in affected:
-            task = self._close_tasks.pop(profile_id, None)
-            if task is not None and not task.done():
-                task.cancel()
-            self._contexts.pop(profile_id, None)
-            self._cdp_urls.pop(profile_id, None)
-            self._profile_slots.pop(profile_id, None)
-            self._closing.discard(profile_id)
-            self._set_state(profile_id, RuntimeState.STOPPED)
+            affected = [
+                profile_id
+                for profile_id, assigned_slot in self._profile_slots.items()
+                if assigned_slot == slot
+            ]
+            for profile_id in affected:
+                task = self._close_tasks.pop(profile_id, None)
+                if task is not None and not task.done():
+                    task.cancel()
+                self._contexts.pop(profile_id, None)
+                self._cdp_urls.pop(profile_id, None)
+                self._profile_slots.pop(profile_id, None)
+                self._closing.discard(profile_id)
+                self._set_state(profile_id, RuntimeState.STOPPED)
 
     async def _handle_context_closed(
         self, profile_id: str, generation: int, context: Any

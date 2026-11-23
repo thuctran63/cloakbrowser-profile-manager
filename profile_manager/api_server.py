@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
 
-from .browser_service import BrowserService, CLOSE_TIMEOUT, LAUNCH_TIMEOUT
+from .browser_service import BrowserService, CLOSE_TIMEOUT, LAUNCH_TIMEOUT, LaunchBusyError
 from .devtools import get_cdp_websocket_url
 from .models import OpenOptions, ProfileConfig, ProfileSettings
 from .openapi import SWAGGER_UI_HTML, build_openapi
@@ -134,6 +134,8 @@ class ProfileApiServer:
                     self._error(HTTPStatus.BAD_REQUEST, "invalid_request", str(exc), request_id)
                 except WorkerUnavailableError:
                     self._error(HTTPStatus.SERVICE_UNAVAILABLE, "worker_unavailable", "Browser worker không khả dụng", request_id)
+                except LaunchBusyError as exc:
+                    self._error(HTTPStatus.SERVICE_UNAVAILABLE, "launch_busy", str(exc), request_id)
                 except FutureTimeoutError:
                     self._error(HTTPStatus.REQUEST_TIMEOUT, "browser_operation_timeout", "Browser operation quá thời hạn", request_id)
                 except Exception:
@@ -147,15 +149,17 @@ class ProfileApiServer:
                     body = self._body()
                     if not body:
                         raise ValueError("PATCH body không được để trống")
-                    name, proxy, settings = self._profile_payload(body, current=profile)
-                    updated = api.store.update_profile(
-                        profile_id, name, proxy, settings,
-                    )
+                    def update() -> ProfileConfig:
+                        current = api.store.get_profile(profile_id)
+                        name, proxy, settings = self._profile_payload(body, current=current)
+                        return api.store.update_profile(profile_id, name, proxy, settings)
+
+                    updated = api.worker.submit(api.browser_service.mutate_profile(profile_id, update)).result()
                     self._json(HTTPStatus.OK, self._profile(updated))
                 elif method == "DELETE":
-                    if api.browser_service.state(profile_id).value != "Stopped":
-                        raise ValueError("Phải đóng profile trước khi xóa")
-                    api.store.delete_profile(profile_id)
+                    api.worker.submit(api.browser_service.mutate_profile(
+                        profile_id, lambda: api.store.delete_profile(profile_id), stopped=True,
+                    )).result()
                     self._json(HTTPStatus.OK, {"deleted": True})
                 else:
                     self._error(
@@ -170,7 +174,8 @@ class ProfileApiServer:
                 expected_method = "GET" if action == "status" else "POST"
                 if method != expected_method:
                     raise KeyError("Endpoint không tồn tại")
-                profile = self._find_profile(profile_id)
+                if action != "open":
+                    self._find_profile(profile_id)
                 if action == "status":
                     snapshot = api.worker.submit(api.browser_service.runtime_snapshot(profile_id)).result(timeout=5)
                     self._json(HTTPStatus.OK, snapshot)
@@ -180,7 +185,12 @@ class ProfileApiServer:
                     self._json(HTTPStatus.OK, {"profileId": profile_id, "status": "stopped"})
                     return
                 options = OpenOptions.from_dict(self._body())
-                http_url = api.worker.submit(api.browser_service.open(profile, options)).result(timeout=LAUNCH_TIMEOUT + 5)
+                future = api.worker.submit(api.browser_service.open_stored(api.store, profile_id, options))
+                try:
+                    http_url = future.result(timeout=LAUNCH_TIMEOUT + 5)
+                except FutureTimeoutError:
+                    future.cancel()
+                    raise
                 websocket_url = get_cdp_websocket_url(http_url)
                 self._json(HTTPStatus.OK, {"profileId": profile_id, "status": "running", "ws": websocket_url, "http": http_url, "pid": None})
 

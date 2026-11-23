@@ -272,13 +272,17 @@ class ProfileManagerApp:
         self.root.wait_window(dialog)
         if not dialog.result:
             return
-        try:
-            updated = self.store.update_profile(profile.id, **dialog.result)
+        changes = dialog.result
+
+        def complete(updated: ProfileConfig) -> None:
             self.refresh_profiles(updated.id)
             self.status_var.set(f"Đã cập nhật {updated.name}")
             self.toast.show(f"Đã cập nhật profile \"{updated.name}\"", kind="success")
-        except Exception as exc:
-            messagebox.showerror("Không thể cập nhật profile", str(exc), parent=self.root)
+
+        self._submit_mutation(
+            profile.id, lambda: self.store.update_profile(profile.id, **changes),
+            complete, "Không thể cập nhật profile",
+        )
 
     def delete_profile(self) -> None:
         profile = self.selected_profile()
@@ -292,20 +296,42 @@ class ProfileManagerApp:
         )
         if not confirmed:
             return
-        try:
-            self.store.delete_profile(profile.id)
+        def complete(_result: Any) -> None:
             self.states.pop(profile.id, None)
             self.refresh_profiles()
             self.status_var.set(f"Đã xóa {profile.name}")
             self.toast.show(f"Đã xóa profile \"{profile.name}\"", kind="success")
+
+        self._submit_mutation(
+            profile.id, lambda: self.store.delete_profile(profile.id),
+            complete, "Không thể xóa profile",
+        )
+
+    def _submit_mutation(self, profile_id: str, operation, on_success, error_title: str) -> None:
+        try:
+            future = self.worker.submit(self.service.mutate_profile(profile_id, operation, stopped=True))
         except Exception as exc:
-            messagebox.showerror("Không thể xóa profile", str(exc), parent=self.root)
+            messagebox.showerror(error_title, str(exc), parent=self.root)
+            return
+
+        def check_completion() -> None:
+            if self.shutting_down:
+                return
+            if not future.done():
+                self.root.after(25, check_completion)
+                return
+            try:
+                on_success(future.result())
+            except Exception as exc:
+                messagebox.showerror(error_title, str(exc), parent=self.root)
+
+        self.root.after(0, check_completion)
 
     def open_profile(self) -> None:
         profile = self.selected_profile()
         if not profile or self.shutting_down or self._state(profile.id) not in {RuntimeState.STOPPED, RuntimeState.ERROR}:
             return
-        future = self.worker.submit(self.service.open(profile))
+        future = self.worker.submit(self.service.open_stored(self.store, profile.id))
         self._observe(future, "Không thể mở profile", profile)
 
     def close_profile(self) -> None:

@@ -17,22 +17,25 @@ async def discover_cdp_url(
     last_error = "DevToolsActivePort chưa sẵn sàng"
     while time.monotonic() < deadline:
         try:
-            if active_port.stat().st_mtime + 1 < started_at:
-                raise ValueError("DevToolsActivePort đã cũ")
-            lines = active_port.read_text(encoding="utf-8").splitlines()
-            if len(lines) < 2 or not lines[1].startswith("/devtools/browser/"):
-                raise ValueError("DevToolsActivePort chưa hoàn chỉnh")
-            port = int(lines[0])
-            if not 1 <= port <= 65535:
-                raise ValueError("DevTools port không hợp lệ")
-            url = f"http://127.0.0.1:{port}"
-            await asyncio.to_thread(_validate_cdp, url, port)
-            return url
+            return await asyncio.to_thread(_probe_cdp, active_port, started_at)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             last_error = str(exc)
         await asyncio.sleep(0.1)
     raise TimeoutError(f"Không thể xác thực CDP endpoint: {last_error}")
 
+
+def _probe_cdp(active_port: Path, started_at: float) -> str:
+    if active_port.stat().st_mtime + 1 < started_at:
+        raise ValueError("DevToolsActivePort đã cũ")
+    lines = active_port.read_text(encoding="utf-8").splitlines()
+    if len(lines) < 2 or not lines[1].startswith("/devtools/browser/"):
+        raise ValueError("DevToolsActivePort chưa hoàn chỉnh")
+    port = int(lines[0])
+    if not 1 <= port <= 65535:
+        raise ValueError("DevTools port không hợp lệ")
+    url = f"http://127.0.0.1:{port}"
+    _validate_cdp(url, port)
+    return url
 
 def _validate_cdp(url: str, port: int) -> None:
     with urlopen(f"{url}/json/version", timeout=1) as response:
