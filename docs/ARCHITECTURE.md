@@ -1,6 +1,6 @@
 # Kiến trúc CloakBrowser Profile Manager
 
-> Tài liệu này mô tả **source hiện tại** của ứng dụng desktop và bản release `v0.3.11`. Đây không phải kiến trúc mục tiêu trong tương lai.
+> Tài liệu này mô tả **source hiện tại** của ứng dụng desktop và bản release `v0.3.12`. Đây không phải kiến trúc mục tiêu trong tương lai.
 
 ## 1. Bức tranh tổng thể
 
@@ -138,7 +138,8 @@ Mỗi profile có:
 - user-data directory riêng;
 - proxy/GeoIP/timezone/locale riêng;
 - optional extensions và humanization;
-- dynamic CDP port chỉ bind `127.0.0.1`.
+- dynamic CDP port chỉ bind `127.0.0.1`;
+- `--renderer-process-limit=1`, ép Chromium dọn spare renderer thay vì pre-warm cho mỗi site process. Đây không phải hard cap: khi đạt ngưỡng, Chromium chỉ reuse process nếu nó phù hợp với site instance, còn lại vẫn tạo process mới, nên process isolation không đổi.
 
 ## 5. Luồng đóng và crash
 

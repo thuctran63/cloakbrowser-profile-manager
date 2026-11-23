@@ -202,6 +202,7 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertRegex(kwargs["args"][4], r"^--remote-debugging-port=\d+$")
             self.assertEqual(kwargs["args"][5], "--remote-debugging-address=127.0.0.1")
+            self.assertIn("--renderer-process-limit=1", kwargs["args"])
             self.assertIsNone(kwargs["extension_paths"])
             self.assertEqual(kwargs["proxy"], self.profile.proxy)
             self.assertFalse(kwargs["stealth_args"])

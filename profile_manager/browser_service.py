@@ -218,6 +218,14 @@ class BrowserService:
                 "--mute-audio",
                 "--remote-debugging-port=0",
                 "--remote-debugging-address=127.0.0.1",
+                # Chromium pre-creates a spare renderer per site process, which
+                # doubles the renderer footprint of an idle profile. Capping the
+                # renderer process count destroys that spare and saves ~10% of
+                # private memory per profile. The switch is not a hard cap: when
+                # the count is reached Chromium reuses a process only if it is
+                # suitable for the site instance, and otherwise creates a new
+                # one, so site isolation is unaffected.
+                "--renderer-process-limit=1",
             ]
             if options.pos_x is not None:
                 launch_args.append(f"--window-position={options.pos_x},{options.pos_y}")

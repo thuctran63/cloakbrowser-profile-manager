@@ -211,6 +211,12 @@ Proxy có thể nhập dưới dạng `http://user:pass@host:port` hoặc `socks
 
 Chromium nhận `--remote-debugging-port=0`; ứng dụng đọc file `DevToolsActivePort` mới và xác thực `/json/version` trước khi công bố CDP URL. Cách này tránh race do chọn trước một free port.
 
+Chromium cũng nhận `--renderer-process-limit=1`. Mặc định Chromium tạo sẵn một
+spare renderer cho mỗi site process, khiến một profile idle giữ hai renderer thay
+vì một. Cap này dọn spare đó và giảm khoảng 10% private memory mỗi profile. Đây
+không phải hard cap: khi đạt ngưỡng, Chromium chỉ reuse process nếu nó phù hợp với
+site instance, còn lại vẫn tạo process mới, nên process isolation giữ nguyên.
+
 Humanization chỉ bọc thao tác Playwright chạy trong process Profile Manager.
 Client ngoài kết nối qua CDP phải tự humanize chuột, bàn phím và scroll ở phía
 client; lớp này không tự truyền qua CDP.
