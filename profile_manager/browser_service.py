@@ -200,22 +200,6 @@ class BrowserService:
             raise RuntimeError("Hãy đóng profile lỗi trước khi mở lại")
         self._set_state(profile.id, RuntimeState.STARTING)
         try:
-            async with self._launch_slots:
-                if self._draining:
-                    raise RuntimeError("Dịch vụ đang shutdown")
-                return await self._open_locked(profile, options)
-        finally:
-            if self.state(profile.id) == RuntimeState.STARTING:
-                self._set_state(profile.id, RuntimeState.STOPPED)
-
-    async def _open_locked(self, profile: ProfileConfig, options: OpenOptions) -> str:
-        context: Any | None = None
-        driver: Any | None = None
-        generation = self._generation.get(profile.id, 0) + 1
-        self._generation[profile.id] = generation
-
-        self._set_state(profile.id, RuntimeState.STARTING)
-        try:
             def prepare() -> tuple[float, list[str]]:
                 profile.user_data_dir.mkdir(parents=True, exist_ok=True)
                 if options.page_zoom is not None:
@@ -247,6 +231,33 @@ class BrowserService:
             )
             if exit_ip:
                 launch_args.append(f"--fingerprint-webrtc-ip={exit_ip}")
+            async with self._launch_slots:
+                if self._draining:
+                    raise RuntimeError("Dịch vụ đang shutdown")
+                return await self._open_locked(
+                    profile, options, started_at, extension_paths, launch_args, timezone, locale,
+                )
+        finally:
+            if self.state(profile.id) == RuntimeState.STARTING:
+                self._set_state(profile.id, RuntimeState.STOPPED)
+
+    async def _open_locked(
+        self,
+        profile: ProfileConfig,
+        options: OpenOptions,
+        started_at: float,
+        extension_paths: list[str],
+        launch_args: list[str],
+        timezone: str | None,
+        locale: str | None,
+    ) -> str:
+        context: Any | None = None
+        driver: Any | None = None
+        generation = self._generation.get(profile.id, 0) + 1
+        self._generation[profile.id] = generation
+
+        self._set_state(profile.id, RuntimeState.STARTING)
+        try:
             driver = await self._get_playwright(profile.id)
             context = await launch_persistent_context_async(
                 profile.user_data_dir,

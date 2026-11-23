@@ -460,6 +460,54 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(task.done())
             await task
 
+    async def test_geoip_resolution_does_not_occupy_launch_slots(self) -> None:
+        import threading
+
+        profiles = [
+            ProfileConfig(
+                id=f"00000000-0000-0000-0000-{index:012d}",
+                name=f"Profile {index}",
+                proxy=None,
+                fingerprint_seed=54320 + index,
+                data_dir=str(Path(self.temp.name) / f"profile-{index}"),
+                created_at="now",
+                updated_at="now",
+            )
+            for index in range(1, 4)
+        ]
+        all_resolvers_started = threading.Event()
+        release_resolvers = threading.Event()
+        resolver_count = 0
+        resolver_lock = threading.Lock()
+
+        def resolve(*_args):
+            nonlocal resolver_count
+            with resolver_lock:
+                resolver_count += 1
+                if resolver_count == len(profiles):
+                    all_resolvers_started.set()
+            release_resolvers.wait(timeout=1)
+            return None, None, None
+
+        with patch("profile_manager.browser_service.maybe_resolve_geoip", resolve), patch(
+            "profile_manager.browser_service.launch_persistent_context_async",
+            side_effect=[FakeContext(), FakeContext(), FakeContext()],
+        ), patch(
+            "profile_manager.browser_service.discover_cdp_url",
+            side_effect=[
+                "http://127.0.0.1:9222",
+                "http://127.0.0.1:9223",
+                "http://127.0.0.1:9224",
+            ],
+        ):
+            tasks = [asyncio.create_task(self.service.open(profile)) for profile in profiles]
+            started = await asyncio.to_thread(all_resolvers_started.wait, 1)
+            release_resolvers.set()
+            self.assertTrue(started)
+            await asyncio.gather(*tasks)
+
+        self.assertEqual(resolver_count, len(profiles))
+
     async def test_profiles_launch_concurrently(self) -> None:
         second_profile = ProfileConfig(
             id="00000000-0000-0000-0000-000000000002",
