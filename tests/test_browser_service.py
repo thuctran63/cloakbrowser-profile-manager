@@ -406,7 +406,7 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(assigned_playwrights[0], assigned_playwrights[1])
         self.assertTrue(all(playwright.stop_calls == 1 for playwright in factory.playwrights))
 
-    async def test_close_timeout_keeps_context_for_retry(self) -> None:
+    async def test_close_timeout_force_cleans_and_allows_immediate_reopen(self) -> None:
         context = FakeContext()
         self.service._contexts[self.profile.id] = context
         self.service._states[self.profile.id] = RuntimeState.RUNNING
@@ -421,18 +421,20 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(context, "close", stuck_close), patch(
             "profile_manager.browser_service.CLOSE_TIMEOUT", 0.01
-        ):
-            with self.assertRaises(TimeoutError):
-                await self.service.close(self.profile.id)
-
-        self.assertIs(self.service._contexts[self.profile.id], context)
-        self.assertEqual(self.service.state(self.profile.id), RuntimeState.ERROR)
-        with self.assertRaisesRegex(RuntimeError, "đóng"):
-            await self.service.open(self.profile)
-        release.set()
-        await self.service.close(self.profile.id)
-        self.assertTrue(context.closed)
+        ), patch("profile_manager.browser_service.ensure_profile_unlocked") as unlock_mock:
+            await self.service.close(self.profile.id, user_data_dir=self.profile.user_data_dir)
+        unlock_mock.assert_called_once_with(self.profile.user_data_dir, force_process_scan=True)
+        self.assertNotIn(self.profile.id, self.service._contexts)
         self.assertEqual(self.service.state(self.profile.id), RuntimeState.STOPPED)
+
+        new_context = FakeContext()
+        with patch("profile_manager.browser_service.launch_persistent_context_async", return_value=new_context), patch(
+            "profile_manager.browser_service.discover_cdp_url", return_value="http://127.0.0.1:9223"
+        ):
+            cdp = await self.service.open(self.profile)
+        self.assertEqual(cdp, "http://127.0.0.1:9223")
+        release.set()
+        await asyncio.sleep(0)
 
     async def test_open_applies_resolved_identity_without_blocking_worker(self) -> None:
         import time
@@ -560,9 +562,10 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
             "profile_manager.browser_service.discover_cdp_url", return_value="http://127.0.0.1:9222"
         ):
             await self.service.open(self.profile)
-        with patch.object(context, "close", delayed_close), patch("profile_manager.browser_service.CLOSE_TIMEOUT", 0.01):
-            with self.assertRaises(TimeoutError):
-                await self.service.close(self.profile.id)
+        with patch.object(context, "close", delayed_close), patch(
+            "profile_manager.browser_service.CLOSE_TIMEOUT", 0.01
+        ), patch("profile_manager.browser_service.ensure_profile_unlocked"):
+            await self.service.close(self.profile.id)
             task = self.service._close_tasks[self.profile.id]
             release.set()
             await task
@@ -571,31 +574,69 @@ class BrowserServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(self.profile.id, self.service._contexts)
         self.assertNotIn(self.profile.id, self.service._close_tasks)
 
-    async def test_failed_open_retains_context_when_cleanup_fails(self) -> None:
+    async def test_failed_open_force_cleans_context_and_allows_reopen(self) -> None:
+        from profile_manager.browser_service import BrowserOperationError
+
         context = FakeContext()
         with patch("profile_manager.browser_service.launch_persistent_context_async", return_value=context), patch(
             "profile_manager.browser_service.discover_cdp_url", side_effect=RuntimeError("discovery failed")
-        ), patch.object(context, "close", side_effect=RuntimeError("close failed")):
-            with self.assertRaisesRegex(RuntimeError, "discovery failed"):
+        ), patch.object(context, "close", side_effect=RuntimeError("close failed")), patch(
+            "profile_manager.browser_service.ensure_profile_unlocked"
+        ):
+            with self.assertRaises(BrowserOperationError) as raised:
                 await self.service.open(self.profile)
-        self.assertIs(self.service._contexts[self.profile.id], context)
-        self.assertEqual(self.service.state(self.profile.id), RuntimeState.ERROR)
-        with self.assertRaisesRegex(RuntimeError, "đóng"):
-            await self.service.open(self.profile)
-        await self.service.close(self.profile.id)
-        self.assertTrue(context.closed)
+        self.assertEqual(raised.exception.phase, "waiting_cdp_ready")
+        self.assertNotIn(self.profile.id, self.service._contexts)
 
-    async def test_failed_close_can_be_retried(self) -> None:
+        new_context = FakeContext()
+        with patch("profile_manager.browser_service.launch_persistent_context_async", return_value=new_context), patch(
+            "profile_manager.browser_service.discover_cdp_url", return_value="http://127.0.0.1:9224"
+        ):
+            cdp = await self.service.open(self.profile)
+        self.assertEqual(cdp, "http://127.0.0.1:9224")
+
+    async def test_failed_close_force_cleans_and_converges_to_stopped(self) -> None:
         context = FakeContext()
         self.service._contexts[self.profile.id] = context
         self.service._states[self.profile.id] = RuntimeState.RUNNING
-        with patch.object(context, "close", side_effect=RuntimeError("close failed")):
-            with self.assertRaisesRegex(RuntimeError, "close failed"):
-                await self.service.close(self.profile.id)
-        self.assertIs(self.service._contexts[self.profile.id], context)
-        self.assertEqual(self.service.state(self.profile.id), RuntimeState.ERROR)
-        await self.service.close(self.profile.id)
-        self.assertTrue(context.closed)
+        with patch.object(context, "close", side_effect=RuntimeError("close failed")), patch(
+            "profile_manager.browser_service.ensure_profile_unlocked"
+        ) as unlock_mock:
+            await self.service.close(self.profile.id, user_data_dir=self.profile.user_data_dir)
+        unlock_mock.assert_called_once_with(self.profile.user_data_dir, force_process_scan=True)
+        self.assertNotIn(self.profile.id, self.service._contexts)
+        self.assertEqual(self.service.state(self.profile.id), RuntimeState.STOPPED)
+
+    async def test_open_cleans_stale_singleton_lock_before_launch(self) -> None:
+        self.profile.user_data_dir.mkdir(parents=True, exist_ok=True)
+        singleton = self.profile.user_data_dir / "SingletonLock"
+        singleton.write_text("12345", encoding="utf-8")
+        context = FakeContext()
+
+        async def launch(*_args, **_kwargs):
+            self.assertFalse(singleton.exists())
+            return context
+
+        with patch("profile_manager.process_cleanup.find_profile_pids", return_value=[]), patch(
+            "profile_manager.browser_service.launch_persistent_context_async", launch
+        ), patch("profile_manager.browser_service.discover_cdp_url", return_value="http://127.0.0.1:9225"):
+            cdp = await self.service.open(self.profile)
+        self.assertEqual(cdp, "http://127.0.0.1:9225")
+
+    async def test_launch_queue_timeout_raises_launch_busy(self) -> None:
+        from profile_manager.browser_service import LaunchBusyError
+
+        await self.service._launch_slots.acquire()
+        await self.service._launch_slots.acquire()
+        try:
+            with patch("profile_manager.browser_service.LAUNCH_QUEUE_TIMEOUT", 0.05):
+                with self.assertRaises(LaunchBusyError) as raised:
+                    await self.service.open(self.profile)
+            self.assertEqual(raised.exception.phase, "waiting_launch_slot")
+            self.assertEqual(self.service.state(self.profile.id), RuntimeState.STOPPED)
+        finally:
+            self.service._launch_slots.release()
+            self.service._launch_slots.release()
 
     async def test_launch_limit_does_not_block_closing_running_profile(self) -> None:
         from dataclasses import replace

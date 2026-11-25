@@ -192,3 +192,52 @@ class ProfileApiServerTests(unittest.TestCase):
         with self.assertRaises(HTTPError) as raised:
             self.request("POST", f"/api/v1/profiles/{profile['id']}/open")
         self.assertEqual(raised.exception.code, 503)
+
+    def test_open_timeout_returns_408_with_phase_and_cause(self) -> None:
+        from profile_manager.browser_service import BrowserTimeoutError
+
+        _, profile = self.request("POST", "/api/v1/profiles", {"name": "Timeout"})
+
+        async def timed_out(*_args, **_kwargs):
+            raise BrowserTimeoutError("deadline", phase="waiting_cdp_ready", cause="CDP not ready")
+
+        self.service.open_stored = timed_out
+        with self.assertRaises(HTTPError) as raised:
+            self.request("POST", f"/api/v1/profiles/{profile['id']}/open")
+        self.assertEqual(raised.exception.code, 408)
+        payload = json.loads(raised.exception.read().decode("utf-8"))
+        self.assertEqual(payload["error"]["phase"], "waiting_cdp_ready")
+        self.assertEqual(payload["error"]["cause"], "CDP not ready")
+
+    def test_open_busy_returns_503_with_phase_and_retry_after(self) -> None:
+        from profile_manager.browser_service import LaunchBusyError
+
+        _, profile = self.request("POST", "/api/v1/profiles", {"name": "Busy"})
+
+        async def busy(*_args, **_kwargs):
+            raise LaunchBusyError("queue busy", phase="waiting_launch_slot", cause="slots full")
+
+        self.service.open_stored = busy
+        with self.assertRaises(HTTPError) as raised:
+            self.request("POST", f"/api/v1/profiles/{profile['id']}/open")
+        self.assertEqual(raised.exception.code, 503)
+        self.assertEqual(raised.exception.headers.get("Retry-After"), "2")
+        payload = json.loads(raised.exception.read().decode("utf-8"))
+        self.assertEqual(payload["error"]["phase"], "waiting_launch_slot")
+        self.assertEqual(payload["error"]["cause"], "slots full")
+
+    def test_open_operation_error_returns_500_with_phase_and_cause(self) -> None:
+        from profile_manager.browser_service import BrowserOperationError
+
+        _, profile = self.request("POST", "/api/v1/profiles", {"name": "OpErr"})
+
+        async def failed(*_args, **_kwargs):
+            raise BrowserOperationError("spawn failed", phase="spawning_browser", cause="exit code 21")
+
+        self.service.open_stored = failed
+        with self.assertRaises(HTTPError) as raised:
+            self.request("POST", f"/api/v1/profiles/{profile['id']}/open")
+        self.assertEqual(raised.exception.code, 500)
+        payload = json.loads(raised.exception.read().decode("utf-8"))
+        self.assertEqual(payload["error"]["phase"], "spawning_browser")
+        self.assertEqual(payload["error"]["cause"], "exit code 21")

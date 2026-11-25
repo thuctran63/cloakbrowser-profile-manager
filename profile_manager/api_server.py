@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 import threading
 import uuid
@@ -12,12 +13,21 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
 
-from .browser_service import BrowserService, CLOSE_TIMEOUT, LAUNCH_TIMEOUT, LaunchBusyError
+from .browser_service import (
+    CLOSE_TIMEOUT,
+    LAUNCH_TIMEOUT,
+    BrowserOperationError,
+    BrowserService,
+    BrowserTimeoutError,
+    LaunchBusyError,
+)
 from .devtools import get_cdp_websocket_url
 from .models import OpenOptions, ProfileConfig, ProfileSettings
 from .openapi import SWAGGER_UI_HTML, build_openapi
 from .profile_store import ProfileStore
 from .worker import AsyncWorker, WorkerUnavailableError
+
+logger = logging.getLogger(__name__)
 
 
 class PayloadTooLargeError(ValueError):
@@ -135,11 +145,55 @@ class ProfileApiServer:
                 except WorkerUnavailableError:
                     self._error(HTTPStatus.SERVICE_UNAVAILABLE, "worker_unavailable", "Browser worker không khả dụng", request_id)
                 except LaunchBusyError as exc:
-                    self._error(HTTPStatus.SERVICE_UNAVAILABLE, "launch_busy", str(exc), request_id)
-                except FutureTimeoutError:
-                    self._error(HTTPStatus.REQUEST_TIMEOUT, "browser_operation_timeout", "Browser operation quá thời hạn", request_id)
-                except Exception:
-                    self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error", "Lỗi nội bộ", request_id)
+                    logger.warning("Launch busy [%s] phase=%s cause=%s", request_id, exc.phase, exc.cause)
+                    self._error(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        "launch_busy",
+                        str(exc),
+                        request_id,
+                        headers={"Retry-After": "2"},
+                        phase=exc.phase,
+                        cause=exc.cause,
+                    )
+                except BrowserTimeoutError as exc:
+                    logger.warning("Browser timeout [%s] phase=%s cause=%s", request_id, exc.phase, exc.cause)
+                    self._error(
+                        HTTPStatus.REQUEST_TIMEOUT,
+                        "browser_operation_timeout",
+                        f"Browser operation quá thời hạn ({exc.phase}): {exc.cause}",
+                        request_id,
+                        phase=exc.phase,
+                        cause=exc.cause,
+                    )
+                except BrowserOperationError as exc:
+                    logger.error("Browser operation error [%s] phase=%s cause=%s", request_id, exc.phase, exc.cause)
+                    self._error(
+                        HTTPStatus(exc.status_code),
+                        exc.code,
+                        f"{exc} ({exc.phase})",
+                        request_id,
+                        phase=exc.phase,
+                        cause=exc.cause,
+                    )
+                except FutureTimeoutError as exc:
+                    logger.warning("Future timeout [%s] path=%s", request_id, self.path)
+                    self._error(
+                        HTTPStatus.REQUEST_TIMEOUT,
+                        "browser_operation_timeout",
+                        "Browser operation quá thời hạn (waiting_worker)",
+                        request_id,
+                        phase="waiting_worker",
+                        cause=str(exc) or "Worker future timed out",
+                    )
+                except Exception as exc:
+                    logger.exception("Unhandled API error [%s] path=%s", request_id, self.path)
+                    self._error(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        "internal_error",
+                        f"Lỗi nội bộ: {exc}",
+                        request_id,
+                        cause=str(exc),
+                    )
 
             def _profile_route(self, method: str, profile_id: str, request_id: str) -> None:
                 profile = self._find_profile(profile_id)
@@ -175,13 +229,18 @@ class ProfileApiServer:
                 if method != expected_method:
                     raise KeyError("Endpoint không tồn tại")
                 if action != "open":
-                    self._find_profile(profile_id)
+                    profile = self._find_profile(profile_id)
+                else:
+                    profile = None
                 if action == "status":
                     snapshot = api.worker.submit(api.browser_service.runtime_snapshot(profile_id)).result(timeout=5)
                     self._json(HTTPStatus.OK, snapshot)
                     return
                 if action == "close":
-                    api.worker.submit(api.browser_service.close(profile_id)).result(timeout=CLOSE_TIMEOUT + 5)
+                    user_data_dir = profile.user_data_dir if profile is not None else None
+                    api.worker.submit(
+                        api.browser_service.close(profile_id, user_data_dir=user_data_dir)
+                    ).result(timeout=CLOSE_TIMEOUT + 5)
                     self._json(HTTPStatus.OK, {"profileId": profile_id, "status": "stopped"})
                     return
                 options = OpenOptions.from_dict(self._body())
@@ -264,8 +323,16 @@ class ProfileApiServer:
                 message: str,
                 request_id: str,
                 headers: dict[str, str] | None = None,
+                *,
+                phase: str | None = None,
+                cause: str | None = None,
             ) -> None:
-                payload = {"error": {"code": code, "message": message, "request_id": request_id}}
+                error_body: dict[str, Any] = {"code": code, "message": message, "request_id": request_id}
+                if phase is not None:
+                    error_body["phase"] = phase
+                if cause is not None:
+                    error_body["cause"] = cause
+                payload = {"error": error_body}
                 self.send_response(status)
                 for name, value in (headers or {}).items():
                     self.send_header(name, value)
